@@ -14,7 +14,8 @@ clients** in the same change.
 | detach | `detach` | `Detach(id)` | `detach(id)` | `detach(id)` |
 | write (raw bytes) | `write_pane` | `WritePane(id,[]byte)` | `writeBytes(id,buf)` | `write_pane(id,bytes)` |
 | write (text) | `write_pane` | `WritePane(id,[]byte(s))` | `writePane(id,text)` | `write_pane(id,str)` |
-| capture buffer | `capture_pane` | `CapturePane(id)` | `capturePane(id)` | `capture_pane(id)` |
+| capture buffer | `capture_pane` | `CapturePane(id[,WithSettle…])` | `capturePane(id,{settleMs?})` | `capture_pane(id,settle_ms?)` |
+| render screen | `capture_pane{render}` | `CaptureScreen(id[,WithSettle…])` | `captureScreen(id,{settleMs?})` | `capture_screen(id,settle_ms?)` |
 | resize | `resize` | `Resize(id,cols,rows)` | `resize(id,cols,rows)` | `resize(id,cols,rows)` |
 | kill | `kill` | `Kill(id)` | `kill(id)` | `kill(id)` |
 | gc (reap idle) | `gc` | `GC(maxIdleSeconds)` | `gc(maxIdleSeconds)` | `gc(max_idle_seconds)` |

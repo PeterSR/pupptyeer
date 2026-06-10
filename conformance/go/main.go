@@ -122,6 +122,33 @@ func main() {
 		fail("session still listed after kill")
 	}
 
+	// rendered capture + settle: a cursor-positioned layout that naive ANSI
+	// stripping would collapse to "AB".
+	id3, err := c.NewSession("sh", []string{"-c", "printf 'A\\033[1;10HB'; sleep 2"}, "", nil, 80, 24)
+	if err != nil {
+		fail("new_session(render): %v", err)
+	}
+	scr, err := c.CaptureScreen(id3, client.WithSettle(200), client.WithTimeout(2000))
+	if err != nil {
+		fail("capture_screen: %v", err)
+	}
+	if scr.Cols != 80 || scr.Rows != 24 {
+		fail("render dims %dx%d", scr.Cols, scr.Rows)
+	}
+	if len(scr.Lines) != 24 {
+		fail("render line count %d", len(scr.Lines))
+	}
+	if len(scr.Lines) == 0 || len(scr.Lines[0]) < 10 || scr.Lines[0][:10] != "A        B" {
+		got := ""
+		if len(scr.Lines) > 0 {
+			got = scr.Lines[0]
+		}
+		fail("render line0 not cursor-positioned: %q", got)
+	}
+	if err := c.Kill(id3); err != nil {
+		fail("kill(render): %v", err)
+	}
+
 	// gc: a fresh session reaped by gc(0) (reap all idle sessions).
 	id2, err := c.NewSession("cat", nil, "", nil, 80, 24)
 	if err != nil {

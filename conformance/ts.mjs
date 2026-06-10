@@ -48,6 +48,15 @@ while (Date.now() < deadline) {
 }
 if (!gone) fail("session still listed after kill");
 
+// rendered capture + settle: a cursor-positioned layout that naive ANSI
+// stripping would collapse to "AB".
+const id3 = await c.newSession({ command: "sh", args: ["-c", "printf 'A\\033[1;10HB'; sleep 2"], cols: 80, rows: 24 });
+const scr = await c.captureScreen(id3, { settleMs: 200, timeoutMs: 2000 });
+if (scr.cols !== 80 || scr.rows !== 24) fail(`render dims ${scr.cols}x${scr.rows}`);
+if (scr.lines.length !== 24) fail(`render line count ${scr.lines.length}`);
+if (scr.lines[0].slice(0, 10) !== "A        B") fail(`render line0 not cursor-positioned: ${JSON.stringify(scr.lines[0].slice(0, 12))}`);
+await c.kill(id3);
+
 // gc: a fresh session reaped by gc(0) (reap all idle sessions).
 const id2 = await c.newSession({ command: "cat", cols: 80, rows: 24 });
 const reaped = await c.gc(0);

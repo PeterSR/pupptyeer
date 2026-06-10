@@ -32,7 +32,9 @@ go build -C mcp -o ../bin/pupptyeer-mcp .         # MCP front-end (separate modu
 ./bin/pupptyeer ctl new bash                 # -> <session-id>
 ./bin/pupptyeer ctl list
 ./bin/pupptyeer ctl send <id> $'echo hi\n'
-./bin/pupptyeer ctl capture <id>
+./bin/pupptyeer ctl capture <id>             # raw scrollback bytes (ANSI included)
+./bin/pupptyeer ctl capture --render <id>    # rendered visible screen (escape codes applied, one line per row)
+./bin/pupptyeer ctl capture --render --settle 200 <id>  # wait for the screen to go quiet (200ms), then render
 ./bin/pupptyeer ctl attach <id>              # interactive: stdin forwarded, resize propagated, Ctrl-\ detaches
 ./bin/pupptyeer ctl attach -r <id>           # read-only output stream (auto when stdin isn't a tty)
 ./bin/pupptyeer ctl kill <id>
@@ -100,11 +102,21 @@ NDJSON over a unix socket: one JSON object per line, raw PTY bytes base64 in `da
 `new_session`, `list_sessions`, `attach`/`detach`, `write_pane`, `capture_pane`, `resize`, `kill`,
 `gc` (reap sessions idle past a threshold). Full spec in [`PROTOCOL.md`](PROTOCOL.md).
 
+`capture_pane` has two modes. By default it returns raw scrollback bytes. With `render`, the daemon
+maintains one live terminal emulator per session and returns the **rendered visible screen** - the
+authoritative grid of `cols`×`rows`, the cursor, and whether the program is on the alternate screen
+buffer - so clients never have to embed their own emulator to read a TUI. Either mode accepts
+`settle_ms` to hold the reply until the PTY has been quiet for that long (the reliable way to read a
+screen after sending input). Rendering reports *what is on the screen*, never what it means; any
+interpretation belongs in the layer above.
+
 ## MCP server
 
 `pupptyeer-mcp` is a separate binary and Go module that exposes the daemon's verbs as MCP tools. It
 depends only on the Go client and reaches the daemon over the socket, so the daemon never inherits
-the MCP, HTTP, or OAuth dependencies. It serves **stdio** (the default) or **Streamable HTTP**. The
+the MCP, HTTP, or OAuth dependencies. Its `read_screen` tool returns the rendered visible grid by
+default (set `render=false` for raw scrollback) and accepts `settle_ms`, so an agent can send input
+and then read a settled screen. It serves **stdio** (the default) or **Streamable HTTP**. The
 HTTP transport offers three auth modes: loopback-only with no token, a static bearer token
 (`-auth token`), or an OAuth 2.1 resource server (`-auth oauth`) that validates an external
 identity provider's bearer JWTs and publishes RFC 9728 protected-resource metadata.

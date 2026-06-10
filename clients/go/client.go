@@ -183,13 +183,60 @@ func (c *Client) WritePane(session string, data []byte) error {
 	return c.send(Message{Type: TypeWritePane, Session: session, Data: EncodeData(data)})
 }
 
+// CaptureOption tunes a capture call. Use WithSettle/WithTimeout to wait
+// for the screen to go quiet before snapshotting.
+type CaptureOption func(*Message)
+
+// WithSettle holds the capture reply until the PTY has produced no output
+// for a continuous ms window. ms <= 0 disables waiting (the default).
+func WithSettle(ms int) CaptureOption { return func(m *Message) { m.SettleMs = ms } }
+
+// WithTimeout caps the total settle wait. ms <= 0 uses the daemon default.
+func WithTimeout(ms int) CaptureOption { return func(m *Message) { m.TimeoutMs = ms } }
+
+// Screen is the rendered visible terminal grid returned by CaptureScreen.
+// Lines holds exactly Rows strings, each space-padded to Cols.
+type Screen struct {
+	Cols, Rows int
+	Lines      []string
+	Cursor     Cursor
+	AltScreen  bool
+}
+
 // CapturePane returns a snapshot of the session's raw scrollback bytes.
-func (c *Client) CapturePane(session string) ([]byte, error) {
-	reply, err := c.call(Message{Type: TypeCapturePane, Session: session})
+// With WithSettle, it first waits for the screen to go quiet.
+func (c *Client) CapturePane(session string, opts ...CaptureOption) ([]byte, error) {
+	m := Message{Type: TypeCapturePane, Session: session}
+	for _, o := range opts {
+		o(&m)
+	}
+	reply, err := c.call(m)
 	if err != nil {
 		return nil, err
 	}
 	return DecodeData(reply.Data)
+}
+
+// CaptureScreen returns the daemon's authoritative rendered screen (the
+// visible grid, not scrollback). With WithSettle, it first waits for the
+// screen to go quiet - the usual way to read a TUI after sending input.
+func (c *Client) CaptureScreen(session string, opts ...CaptureOption) (*Screen, error) {
+	m := Message{Type: TypeCapturePane, Session: session, Render: true}
+	for _, o := range opts {
+		o(&m)
+	}
+	reply, err := c.call(m)
+	if err != nil {
+		return nil, err
+	}
+	scr := &Screen{Cols: reply.Cols, Rows: reply.Rows, Lines: reply.Lines, AltScreen: reply.AltScreen}
+	if reply.Lines == nil {
+		scr.Lines = []string{}
+	}
+	if reply.Cursor != nil {
+		scr.Cursor = *reply.Cursor
+	}
+	return scr, nil
 }
 
 // Resize updates this client's desired size for the session (effective

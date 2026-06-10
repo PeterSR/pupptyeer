@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -64,10 +65,46 @@ func runCtl(args []string) error {
 		return c.WritePane(args[1], []byte(args[2]))
 
 	case "capture":
-		if len(args) < 2 {
-			return errors.New("usage: pupptyeer ctl capture <session>")
+		render := false
+		settleMs := 0
+		rest := args[1:]
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") {
+			switch {
+			case rest[0] == "--render":
+				render = true
+				rest = rest[1:]
+			case rest[0] == "--settle":
+				if len(rest) < 2 {
+					return errors.New("usage: pupptyeer ctl capture [--render] [--settle <ms>] <session>")
+				}
+				ms, err := strconv.Atoi(rest[1])
+				if err != nil || ms < 0 {
+					return fmt.Errorf("invalid --settle value %q", rest[1])
+				}
+				settleMs = ms
+				rest = rest[2:]
+			default:
+				return fmt.Errorf("unknown flag %q for capture", rest[0])
+			}
 		}
-		data, err := c.CapturePane(args[1])
+		if len(rest) < 1 {
+			return errors.New("usage: pupptyeer ctl capture [--render] [--settle <ms>] <session>")
+		}
+		var opts []client.CaptureOption
+		if settleMs > 0 {
+			opts = append(opts, client.WithSettle(settleMs))
+		}
+		if render {
+			scr, err := c.CaptureScreen(rest[0], opts...)
+			if err != nil {
+				return err
+			}
+			for _, line := range scr.Lines {
+				fmt.Println(strings.TrimRight(line, " "))
+			}
+			return nil
+		}
+		data, err := c.CapturePane(rest[0], opts...)
 		if err != nil {
 			return err
 		}

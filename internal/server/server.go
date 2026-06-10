@@ -322,6 +322,16 @@ func (c *conn) handleCapture(m protocol.Message) {
 		c.sendError(m.ID, m.Session, "session not found")
 		return
 	}
+	// Optionally wait for the screen to go quiet before snapshotting.
+	s.waitSettle(m.SettleMs, m.TimeoutMs)
+	if m.Render {
+		cols, rows, lines, cur, alt := s.renderScreen()
+		c.send(protocol.Message{
+			Type: protocol.TypeCapture, ID: m.ID, Session: s.id,
+			Cols: cols, Rows: rows, Lines: lines, Cursor: &cur, AltScreen: alt,
+		})
+		return
+	}
 	c.send(protocol.Message{Type: protocol.TypeCapture, ID: m.ID, Session: s.id, Data: protocol.EncodeData(s.capture())})
 }
 

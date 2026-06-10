@@ -65,6 +65,19 @@ while time.time() < deadline:
 if not gone:
     fail("session still listed after kill")
 
+# rendered capture + settle: a cursor-positioned layout that naive ANSI
+# stripping would collapse to "AB".
+sid3 = c.new_session(command="sh", args=["-c", "printf 'A\\033[1;10HB'; sleep 2"],
+                     cols=80, rows=24)
+scr = c.capture_screen(sid3, settle_ms=200, timeout_ms=2000)
+if scr.cols != 80 or scr.rows != 24:
+    fail("render dims %dx%d" % (scr.cols, scr.rows))
+if len(scr.lines) != 24:
+    fail("render line count %d" % len(scr.lines))
+if scr.lines[0][:10] != "A        B":
+    fail("render line0 not cursor-positioned: %r" % scr.lines[0][:12])
+c.kill(sid3)
+
 # gc: a fresh session reaped by gc(0) (reap all idle sessions).
 sid2 = c.new_session(command="cat", cols=80, rows=24)
 reaped = c.gc(0)

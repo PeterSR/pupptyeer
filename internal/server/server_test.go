@@ -281,6 +281,55 @@ func TestAttachDuringActiveOutput(t *testing.T) {
 	_ = b.Kill(id)
 }
 
+// TestRenderedCaptureAndSettle drives a program that positions the cursor
+// and toggles cursor visibility, then asserts the daemon renders the
+// authoritative grid (not a naive ANSI strip) and that settle waits for the
+// screen to go quiet. "A" at col 1, cursor to col 10, "B", hide cursor:
+// a naive strip would collapse this to "AB".
+func TestRenderedCaptureAndSettle(t *testing.T) {
+	sock := startServer(t)
+	c, err := client.Dial(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	id, err := c.NewSession("sh", []string{"-c", "printf 'A\\033[1;10HB\\033[?25l'; sleep 5"}, "", nil, 80, 24)
+	if err != nil {
+		t.Fatalf("new_session: %v", err)
+	}
+	defer func() { _ = c.Kill(id) }()
+
+	scr, err := c.CaptureScreen(id, client.WithSettle(200), client.WithTimeout(3000))
+	if err != nil {
+		t.Fatalf("capture_screen: %v", err)
+	}
+	if scr.Cols != 80 || scr.Rows != 24 {
+		t.Fatalf("grid dims = %dx%d, want 80x24", scr.Cols, scr.Rows)
+	}
+	if len(scr.Lines) != 24 {
+		t.Fatalf("line count = %d, want 24", len(scr.Lines))
+	}
+	if scr.Lines[0] != "A        B"+strings.Repeat(" ", 70) {
+		t.Fatalf("line 0 not cursor-positioned/padded: %q", scr.Lines[0])
+	}
+	for i, l := range scr.Lines {
+		if len(l) != 80 {
+			t.Fatalf("line %d width = %d, want 80", i, len(l))
+		}
+	}
+	// Cursor advanced past "B" (col index 10, row 0) and was hidden.
+	if scr.Cursor.Row != 0 || scr.Cursor.Col != 10 {
+		t.Fatalf("cursor = (%d,%d), want (0,10)", scr.Cursor.Row, scr.Cursor.Col)
+	}
+	if scr.Cursor.Visible {
+		t.Fatal("cursor should be hidden (DECTCEM)")
+	}
+	if scr.AltScreen {
+		t.Fatal("not on alternate screen")
+	}
+}
+
 func TestProtocolRoundTrip(t *testing.T) {
 	code := 7
 	in := protocol.Message{Type: protocol.TypeExit, Session: "abc", ExitCode: &code}

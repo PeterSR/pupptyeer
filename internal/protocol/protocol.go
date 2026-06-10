@@ -65,10 +65,30 @@ type Message struct {
 	Data string `json:"data,omitempty"` // base64 of raw PTY bytes
 	Text string `json:"text,omitempty"` // convenience: raw UTF-8 input for write_pane
 
+	// capture_pane options
+	Render    bool `json:"render,omitempty"`     // return the rendered grid instead of raw bytes
+	SettleMs  int  `json:"settle_ms,omitempty"`  // hold reply until PTY quiet for this long
+	TimeoutMs int  `json:"timeout_ms,omitempty"` // cap on settle wait; <=0 uses the default
+
+	// rendered capture response (Render == true). Cols/Rows above carry the
+	// grid dimensions; Lines/Cursor/AltScreen describe the visible screen.
+	Lines     []string `json:"lines,omitempty"`
+	Cursor    *Cursor  `json:"cursor,omitempty"`
+	AltScreen bool     `json:"alt_screen,omitempty"`
+
 	// responses / events
 	Message  string        `json:"message,omitempty"`   // error text
 	ExitCode *int          `json:"exit_code,omitempty"` // pointer so 0 is preserved
 	Sessions []SessionInfo `json:"sessions,omitempty"`
+}
+
+// Cursor is the cursor position in a rendered capture. Row/Col are 0-based;
+// Col may equal the grid width (a pending-wrap cursor). Visible reflects the
+// terminal's cursor-visibility (DECTCEM) state.
+type Cursor struct {
+	Row     int  `json:"row"`
+	Col     int  `json:"col"`
+	Visible bool `json:"visible"`
 }
 
 // SessionInfo is the metadata returned by list_sessions (and the reaped

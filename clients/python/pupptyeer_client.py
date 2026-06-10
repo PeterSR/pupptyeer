@@ -14,7 +14,27 @@ import base64
 import json
 import socket
 import threading
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional
+
+
+@dataclass
+class Cursor:
+    """Cursor position in a rendered capture; 0-based, col may equal cols."""
+    row: int = 0
+    col: int = 0
+    visible: bool = True
+
+
+@dataclass
+class Screen:
+    """The rendered visible terminal grid returned by capture_screen.
+    lines holds exactly rows strings, each space-padded to cols."""
+    cols: int = 0
+    rows: int = 0
+    lines: List[str] = field(default_factory=list)
+    cursor: Cursor = field(default_factory=Cursor)
+    alt_screen: bool = False
 
 
 class PupptyeerClient:
@@ -23,7 +43,7 @@ class PupptyeerClient:
         self._lock = threading.Lock()
         self._next_id = 0
         self._pending: dict[int, list] = {}  # id -> [Event, result]
-        self._output_handlers: dict[str, Callable[[bytes], None]] = {}
+        self._output_handlers: dict[str, list[Callable[[bytes], None]]] = {}
         self._event_handlers: list[Callable[[dict], None]] = []
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -72,10 +92,13 @@ class PupptyeerClient:
                 slot[0].set()
                 return
         if msg.get("type") == "output":
-            h = self._output_handlers.get(msg.get("session", ""))
-            if h:
-                h(base64.b64decode(msg.get("data", "") or ""))
-        for fn in self._event_handlers:
+            hs = self._output_handlers.get(msg.get("session", ""))
+            if hs:
+                data = base64.b64decode(msg.get("data", "") or "")
+                # Copy so a handler that unsubscribes mid-dispatch is safe.
+                for fn in list(hs):
+                    fn(data)
+        for fn in list(self._event_handlers):
             fn(msg)
 
     def _send(self, msg: dict) -> None:
@@ -97,11 +120,38 @@ class PupptyeerClient:
             raise RuntimeError(reply.get("message", "error"))
         return reply
 
-    def on_output(self, session: str, fn: Callable[[bytes], None]) -> None:
-        self._output_handlers[session] = fn
+    def on_output(self, session: str, fn: Callable[[bytes], None]) -> Callable[[], None]:
+        """Register fn for a session's live output. Multiple handlers per
+        session are supported (they all fire). Returns a callable that
+        unsubscribes this handler."""
+        hs = self._output_handlers.setdefault(session, [])
+        hs.append(fn)
 
-    def on_event(self, fn: Callable[[dict], None]) -> None:
+        def off() -> None:
+            cur = self._output_handlers.get(session)
+            if cur is None:
+                return
+            try:
+                cur.remove(fn)
+            except ValueError:
+                return
+            if not cur:
+                self._output_handlers.pop(session, None)
+
+        return off
+
+    def on_event(self, fn: Callable[[dict], None]) -> Callable[[], None]:
+        """Register fn for all unsolicited messages. Returns a callable
+        that unsubscribes this handler."""
         self._event_handlers.append(fn)
+
+        def off() -> None:
+            try:
+                self._event_handlers.remove(fn)
+            except ValueError:
+                pass
+
+        return off
 
     def new_session(self, command: str, args=None, cwd: str = "", env=None,
                     cols: int = 80, rows: int = 24) -> str:
@@ -124,9 +174,32 @@ class PupptyeerClient:
         self._send({"type": "write_pane", "session": session,
                     "data": base64.b64encode(data).decode()})
 
-    def capture_pane(self, session: str) -> bytes:
-        r = self._call({"type": "capture_pane", "session": session})
+    def capture_pane(self, session: str, settle_ms: int = 0,
+                     timeout_ms: int = 0) -> bytes:
+        """Return the session's raw scrollback bytes. With settle_ms > 0,
+        first waits for the screen to go quiet."""
+        r = self._call({"type": "capture_pane", "session": session,
+                        "settle_ms": settle_ms, "timeout_ms": timeout_ms})
         return base64.b64decode(r.get("data", "") or "")
+
+    def capture_screen(self, session: str, settle_ms: int = 0,
+                       timeout_ms: int = 0) -> Screen:
+        """Return the daemon's authoritative rendered screen (the visible
+        grid, not scrollback). With settle_ms > 0, first waits for the
+        screen to go quiet - the usual way to read a TUI after sending
+        input."""
+        r = self._call({"type": "capture_pane", "session": session,
+                        "render": True, "settle_ms": settle_ms,
+                        "timeout_ms": timeout_ms})
+        c = r.get("cursor") or {}
+        return Screen(
+            cols=r.get("cols", 0),
+            rows=r.get("rows", 0),
+            lines=r.get("lines") or [],
+            cursor=Cursor(row=c.get("row", 0), col=c.get("col", 0),
+                          visible=c.get("visible", True)),
+            alt_screen=bool(r.get("alt_screen", False)),
+        )
 
     def resize(self, session: str, cols: int, rows: int) -> None:
         self._send({"type": "resize", "session": session, "cols": cols, "rows": rows})

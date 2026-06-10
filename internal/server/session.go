@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
 
 	"github.com/PeterSR/pupptyeer/internal/protocol"
@@ -20,6 +21,9 @@ const (
 	ptyChunk = 32 * 1024
 	// ringSize bounds per-session scrollback retained for attach replay.
 	ringSize = 256 * 1024
+	// defaultSettleTimeout caps a settle read when the caller passes no
+	// timeout_ms (PROTOCOL.md: capture settle default timeout).
+	defaultSettleTimeout = 5 * time.Second
 )
 
 type winsize struct{ cols, rows int }
@@ -49,12 +53,19 @@ type session struct {
 	// activity - only bytes flowing through the PTY do.
 	lastActivity atomic.Int64
 
-	// mu guards ring, attachments, and the effective size.
+	// mu guards ring, attachments, the effective size, and the emulator.
 	mu          sync.Mutex
 	ring        *ringBuffer
 	attachments map[*conn]winsize
 	effCols     int
 	effRows     int
+
+	// term is a live terminal emulator fed the same bytes as the ring, so
+	// the daemon can answer "what is on the screen" (rendered capture)
+	// authoritatively regardless of ring size. Guarded by mu. cursorVisible
+	// tracks DECTCEM (the emulator exposes visibility only via callback).
+	term          *vt.Emulator
+	cursorVisible bool
 
 	wg         sync.WaitGroup
 	finishOnce sync.Once
@@ -90,19 +101,27 @@ func newSession(srv *Server, p protocol.Message) (*session, error) {
 	}
 
 	s := &session{
-		id:          newID(),
-		srv:         srv,
-		command:     p.Command,
-		args:        p.Args,
-		cwd:         p.Cwd,
-		created:     time.Now(),
-		cmd:         cmd,
-		pty:         pt,
-		ring:        newRingBuffer(ringSize),
-		attachments: make(map[*conn]winsize),
-		effCols:     cols,
-		effRows:     rows,
+		id:            newID(),
+		srv:           srv,
+		command:       p.Command,
+		args:          p.Args,
+		cwd:           p.Cwd,
+		created:       time.Now(),
+		cmd:           cmd,
+		pty:           pt,
+		ring:          newRingBuffer(ringSize),
+		attachments:   make(map[*conn]winsize),
+		effCols:       cols,
+		effRows:       rows,
+		term:          vt.NewEmulator(cols, rows),
+		cursorVisible: true,
 	}
+	// The emulator surfaces cursor visibility (DECTCEM) only through a
+	// callback; mirror it onto the session. Fired during term.Write, which
+	// the read loop always calls under s.mu, so the field is mu-guarded.
+	s.term.SetCallbacks(vt.Callbacks{
+		CursorVisibility: func(visible bool) { s.cursorVisible = visible },
+	})
 	s.alive.Store(true)
 	s.lastActivity.Store(s.created.UnixNano())
 	s.wg.Add(1)
@@ -145,6 +164,7 @@ func (s *session) readLoop() {
 			copy(chunk, buf[:n])
 			s.mu.Lock()
 			s.ring.append(chunk)
+			_, _ = s.term.Write(chunk) // update the live grid in lockstep with the ring
 			data := protocol.EncodeData(chunk)
 			for c := range s.attachments {
 				c.send(protocol.Message{Type: protocol.TypeOutput, Session: s.id, Data: data})
@@ -257,6 +277,7 @@ func (s *session) recomputeSizeLocked() {
 		return
 	}
 	s.effCols, s.effRows = cols, rows
+	s.term.Resize(cols, rows)
 	_ = s.pty.Resize(uint16(cols), uint16(rows))
 }
 
@@ -273,6 +294,82 @@ func (s *session) capture() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ring.snapshot()
+}
+
+// renderScreen returns the visible terminal grid: one string per row
+// (space-padded to the width, no escape sequences), the cursor position,
+// and whether the program is on the alternate screen buffer. The grid is
+// the daemon's authoritative screen state, not scrollback.
+func (s *session) renderScreen() (cols, rows int, lines []string, cur protocol.Cursor, alt bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, h := s.term.Width(), s.term.Height()
+	lines = make([]string, h)
+	buf := make([]rune, 0, w)
+	for y := 0; y < h; y++ {
+		buf = buf[:0]
+		width := 0
+		for x := 0; x < w; x++ {
+			c := s.term.CellAt(x, y)
+			if c == nil || c.Content == "" {
+				buf = append(buf, ' ')
+				width++
+				continue
+			}
+			buf = append(buf, []rune(c.Content)...)
+			cw := c.Width
+			if cw < 1 {
+				cw = 1
+			}
+			width += cw
+			// A wide cell occupies cw columns; skip the trailing ones so
+			// the column count stays aligned with the grid.
+			x += cw - 1
+		}
+		// Pad to the full width so every line is exactly cols wide.
+		for ; width < w; width++ {
+			buf = append(buf, ' ')
+		}
+		lines[y] = string(buf)
+	}
+	p := s.term.CursorPosition()
+	cur = protocol.Cursor{Row: p.Y, Col: p.X, Visible: s.cursorVisible}
+	return w, h, lines, cur, s.term.IsAltScreen()
+}
+
+// waitSettle blocks until the PTY has produced no output for a continuous
+// settleMs window, or until timeoutMs total has elapsed (<=0 uses the
+// default). settleMs <= 0 returns immediately. It polls lastActivity
+// (atomic, bumped by readLoop) and holds no lock, so it never stalls the
+// PTY or other connections.
+func (s *session) waitSettle(settleMs, timeoutMs int) {
+	if settleMs <= 0 {
+		return
+	}
+	settle := time.Duration(settleMs) * time.Millisecond
+	timeout := defaultSettleTimeout
+	if timeoutMs > 0 {
+		timeout = time.Duration(timeoutMs) * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		quiet := time.Since(s.lastActive())
+		if quiet >= settle {
+			return
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return
+		}
+		wait := settle - quiet
+		if d := deadline.Sub(now); d < wait {
+			wait = d
+		}
+		if wait > 25*time.Millisecond {
+			wait = 25 * time.Millisecond
+		}
+		time.Sleep(wait)
+	}
 }
 
 // kill tears the PTY down and waits for the read loop to drain.

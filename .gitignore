@@ -5,6 +5,9 @@
 /pupptyeer-mcp
 /pupptyeer.exe
 /pupptyeer-mcp.exe
+/go
+/mcp/mcp
+/conformance/go/go
 __pycache__/
 *.pyc
 node_modules/

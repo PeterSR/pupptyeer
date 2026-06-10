@@ -3,10 +3,22 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	client "github.com/PeterSR/pupptyeer/clients/go"
 )
+
+// cursorVis renders cursor visibility for the read_screen footer.
+func cursorVis(visible bool) string {
+	if visible {
+		return ""
+	}
+	return " (hidden)"
+}
 
 // buildServer wires the daemon's verbs as MCP tools. Each tool dials the
 // daemon lazily via d, so the MCP process can start before the daemon is up.
@@ -91,8 +103,11 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 
 	s.AddTool(
 		mcp.NewTool("read_screen",
-			mcp.WithDescription("Return the session's current scrollback as text (ANSI escape codes included). Decoded as UTF-8; rare non-UTF-8 bytes are shown as the replacement character. For exact bytes, use the capture_pane wire verb (base64) instead."),
-			mcp.WithString("session", mcp.Description("session id"), mcp.Required())),
+			mcp.WithDescription("Read the session's screen. By default returns the rendered visible grid (escape codes applied, one line per row) - the right view for inspecting a TUI. Set render=false for raw scrollback text (ANSI included). settle_ms waits for the screen to go quiet before reading (use it after sending input); timeout_ms caps that wait. This reports what is on the screen, not what it means."),
+			mcp.WithString("session", mcp.Description("session id"), mcp.Required()),
+			mcp.WithBoolean("render", mcp.Description("rendered visible grid (default true); false for raw scrollback text")),
+			mcp.WithNumber("settle_ms", mcp.Description("wait until no output for this many ms before reading (0 = no wait)")),
+			mcp.WithNumber("timeout_ms", mcp.Description("cap on the settle wait in ms; <=0 uses the daemon default"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -102,11 +117,32 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
-			data, err := c.CapturePane(session)
+			var opts []client.CaptureOption
+			if ms := r.GetInt("settle_ms", 0); ms > 0 {
+				opts = append(opts, client.WithSettle(ms))
+			}
+			if ms := r.GetInt("timeout_ms", 0); ms > 0 {
+				opts = append(opts, client.WithTimeout(ms))
+			}
+			if !r.GetBool("render", true) {
+				data, err := c.CapturePane(session, opts...)
+				if err != nil {
+					return mcp.NewToolResultErrorf("%v", err), nil
+				}
+				return mcp.NewToolResultText(string(data)), nil
+			}
+			scr, err := c.CaptureScreen(session, opts...)
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
-			return mcp.NewToolResultText(string(data)), nil
+			out := strings.Join(scr.Lines, "\n")
+			alt := ""
+			if scr.AltScreen {
+				alt = " alt_screen"
+			}
+			out += fmt.Sprintf("\n--\n%dx%d cursor=%d,%d%s%s", scr.Cols, scr.Rows,
+				scr.Cursor.Row, scr.Cursor.Col, cursorVis(scr.Cursor.Visible), alt)
+			return mcp.NewToolResultText(out), nil
 		})
 
 	s.AddTool(
