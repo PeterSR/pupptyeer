@@ -1,0 +1,184 @@
+# pupptyeer
+
+A small, local **PTY session-manager daemon**: it owns persistent pseudo-terminal sessions, lets
+multiple clients (a human terminal *and* a programmatic driver) attach to the same live session,
+and ships with a CLI and an MCP server to drive them. Generic and program-agnostic: anything
+specific to one agent or app (TUI driving, transcript lifting, web UI) is meant to be built *on top*.
+
+> Status: **v0, initial implementation.** Builds, tested end-to-end on Linux (Go drive test +
+> TS/Python client smoke tests). macOS and Windows are experimental (see [Parity &
+> platforms](#parity--platforms)). Canonical wire spec: [`PROTOCOL.md`](PROTOCOL.md).
+
+## Why
+
+A persistent, agent-agnostic substrate so an app can: start a long-lived process in a PTY, drive it
+programmatically, stream its raw output to a browser terminal (xterm.js), and let a human and an
+automated driver share the same live session. Built fresh to prioritise cross-language ergonomics
++ batteries-included over raw throughput.
+
+## Build & run
+
+```sh
+make build        # both binaries into bin/ (or the two `go build` lines below)
+make install      # install pupptyeer + pupptyeer-mcp into your go bin
+
+go build -o bin/pupptyeer ./cmd/pupptyeer        # daemon + CLI
+go build -C mcp -o ../bin/pupptyeer-mcp .         # MCP front-end (separate module)
+
+# start the daemon (unix socket; override path with $PUPPTYEER_SOCK)
+./bin/pupptyeer daemon &
+
+# drive it
+./bin/pupptyeer ctl new bash                 # -> <session-id>
+./bin/pupptyeer ctl list
+./bin/pupptyeer ctl send <id> $'echo hi\n'
+./bin/pupptyeer ctl capture <id>
+./bin/pupptyeer ctl attach <id>              # interactive: stdin forwarded, resize propagated, Ctrl-\ detaches
+./bin/pupptyeer ctl attach -r <id>           # read-only output stream (auto when stdin isn't a tty)
+./bin/pupptyeer ctl kill <id>
+./bin/pupptyeer ctl gc --max-idle 1h         # reap sessions idle (no PTY I/O) for >= 1h; --max-idle 0 reaps all
+
+# MCP server (separate binary; talks to the daemon over the socket).
+# stdio by default:
+./bin/pupptyeer-mcp
+
+# or Streamable HTTP, with optional auth (none | token | oauth):
+./bin/pupptyeer-mcp -transport http -auth none
+./bin/pupptyeer-mcp -transport http -auth token -token "$PUPPTYEER_MCP_TOKEN"
+./bin/pupptyeer-mcp -transport http -auth oauth \
+    -oauth-issuer https://issuer.example.com -oauth-audience http://127.0.0.1:8765
+```
+
+Socket path resolution: `$PUPPTYEER_SOCK` → `$XDG_RUNTIME_DIR/pupptyeer/daemon.sock` →
+`$TMPDIR/pupptyeer-<user>/daemon.sock`, where `<user>` is the numeric uid on Unix and the user SID
+on Windows (so the default dir is per-user on every platform). Local only: on Unix the socket dir is
+mode `0700` and the socket `0600`; on Windows, where mode bits are ignored, the daemon installs a
+DACL restricting the socket dir to the current user.
+
+## Configuration (optional)
+
+The CLI reads an optional [TOML](https://toml.io) config file, resolved in order: `$PUPPTYEER_CONFIG`,
+else `$XDG_CONFIG_HOME/pupptyeer/config.toml` (honoured on every platform), else the OS-native user
+config dir (`~/.config` on Linux, `~/Library/Application Support` on macOS, `%AppData%` on Windows).
+It is purely client-side, so it affects only `ctl`; the daemon and wire protocol are untouched. A
+missing file is fine; a malformed one (or an unknown key) is reported with the path and line.
+Standard TOML applies: string values are quoted, and inline `#` comments are allowed.
+
+```toml
+# detach key for interactive attach (default: ctrl-\, like dtach).
+# accepts ctrl-X / c-X / ^X, a hex byte like 0x1c, or "none" to disable
+# (leaving SIGINT/SIGTERM as the only way out). use single quotes so the
+# trailing backslash is taken literally.
+detach_key = 'ctrl-]'
+
+# optional tmux-style prefix: detach becomes a two-key sequence,
+# detach_prefix then detach_key. uncomment both for "Ctrl-b then d" like
+# tmux. the prefix must be a control key; with one set detach_key may be
+# any single key (e.g. d). the prefix is held and only forwarded to the
+# session if the next key isn't detach_key, so a prefix you also use
+# inside the session still works.
+#   detach_prefix = 'ctrl-b'
+#   detach_key = 'd'
+
+# default size for `ctl new` when no explicit size is given (default 80x24)
+default_cols = 120
+default_rows = 40
+
+# suppress the "[pupptyeer: attached ...]" banner on attach (default false)
+quiet = false
+```
+
+## Clients
+
+- **Go**: `clients/go` (its own zero-dependency module: `import client "github.com/PeterSR/pupptyeer/clients/go"`)
+- **TypeScript / Node**: `clients/typescript` (zero deps; `npm run smoke`)
+- **Python**: `clients/python` (stdlib only; `python3 smoke.py`)
+
+## Protocol
+
+NDJSON over a unix socket: one JSON object per line, raw PTY bytes base64 in `data`. Verbs:
+`new_session`, `list_sessions`, `attach`/`detach`, `write_pane`, `capture_pane`, `resize`, `kill`,
+`gc` (reap sessions idle past a threshold). Full spec in [`PROTOCOL.md`](PROTOCOL.md).
+
+## MCP server
+
+`pupptyeer-mcp` is a separate binary and Go module that exposes the daemon's verbs as MCP tools. It
+depends only on the Go client and reaches the daemon over the socket, so the daemon never inherits
+the MCP, HTTP, or OAuth dependencies. It serves **stdio** (the default) or **Streamable HTTP**. The
+HTTP transport offers three auth modes: loopback-only with no token, a static bearer token
+(`-auth token`), or an OAuth 2.1 resource server (`-auth oauth`) that validates an external
+identity provider's bearer JWTs and publishes RFC 9728 protected-resource metadata.
+
+## Layout
+
+```
+cmd/pupptyeer            daemon | ctl | version
+mcp/                     pupptyeer-mcp: MCP stdio/http front-end (separate module; deps the Go client)
+internal/protocol     NDJSON message type + codec
+internal/ptyx         cross-platform PTY (creack on Unix, ConPTY on Windows)
+internal/server       daemon: registry, connections, sessions, ring buffer, fan-out
+clients/go            Go client library (separate zero-dep module)
+clients/{typescript,python}   thin clients      (parity matrix: clients/PARITY.md)
+conformance/          scenario + per-language runners + run.sh (cross-client matrix)
+PROTOCOL.md           canonical wire contract (source of truth)
+CLAUDE.md             working guide + parity rule
+```
+
+## Parity & platforms
+
+The daemon and the Go/TS/Python clients move together: `bash conformance/run.sh` runs the same
+scenario through all three against one daemon (the `/check-parity` skill bundles this). The PTY
+layer is cross-platform (creack on Unix, ConPTY on Windows); `windows/amd64`, `windows/arm64`, and
+`darwin/arm64` cross-compile cleanly.
+
+**Linux is the tested, supported platform. macOS and Windows are both experimental**: they
+cross-compile cleanly but have not been run on real hardware. macOS rides the same Unix path
+(creack, SIGWINCH, `0700`/`0600` socket perms), so it is expected to work but is unverified. Windows
+has its platform-specific pieces in place (ConPTY, polled resize, per-user socket dir + DACL), plus
+extra caveats: `SIGTERM` is not deliverable (use Ctrl-C / `SIGINT`), ANSI rendering assumes a
+VT-capable console (Windows Terminal, or `ENABLE_VIRTUAL_TERMINAL_PROCESSING`), and the socket-dir
+DACL fails closed (the daemon refuses to start if it cannot be applied). Verify on real hardware
+before relying on either.
+
+## Related projects
+
+pupptyeer is a PTY session manager in the tmux/screen lineage, built MCP-native from day one, on
+the bet that machine-driven terminals are here to stay, so a protocol for them belongs in the core
+rather than bolted on later. It stays general-purpose: a human shell, a script in any of the three
+client languages, or an AI tool over MCP are all first-class ways to drive the same session. That
+places it between two camps, and depending on what you're after, something in either may serve you
+better:
+
+**Classic session managers** (general-purpose, predate MCP):
+
+- [zmux](https://github.com/smithersai/zmux): daemon-owned PTYs with attach/detach over unix
+  JSON-RPC and server-side scrollback. tmux-like window/pane model. Zig; macOS + Linux; no MCP.
+- tmux / screen: the originals; battle-tested multiplexers, but no machine-native protocol.
+
+**MCP-first, agent-focused tools** (MCP-native, built around AI agents):
+
+- [Forge](https://forgemcp.dev/): persistent `node-pty` daemon with a built-in MCP server, ring
+  buffer with incremental reads, multi-agent fan-out, and a browser dashboard. Node, over HTTP.
+- [pty-mcp + ai-tmux](https://glama.ai/mcp/servers/raychao-oao/pty-mcp): MCP server backed by an
+  `ai-tmux` daemon that keeps PTYs alive over a unix socket. Single Go binary; macOS + Linux,
+  Windows via WSL2.
+
+If AI agents are front and center for you (orchestrating fleets of them, spawning sub-agents,
+watching them in a dashboard), the agent-focused tools above are the better bet; that is what they
+are built for. In pupptyeer an agent is simply one first-class client among several: the MCP server
+sits beside the CLI and the language clients, none privileged over the others.
+
+pupptyeer's own niche is the diagonal between the two: a generic, agent-agnostic session manager
+over a local unix socket, with a built-in MCP server **and** a CLI **and** Go, TypeScript, and
+Python clients held in lockstep protocol parity. If you want one session substrate that is equally
+at home behind a shell, a script, and an AI tool, that is the gap it fills.
+
+## Tests
+
+```sh
+go test ./...     # drive test (attach/detach/replay), resize arbitration, protocol round-trip
+```
+
+## License
+
+MIT.

@@ -1,0 +1,13 @@
+/bin/
+/dist/
+# stray root build artifacts (builds should target bin/)
+/pupptyeer
+/pupptyeer-mcp
+/pupptyeer.exe
+/pupptyeer-mcp.exe
+__pycache__/
+*.pyc
+node_modules/
+.agent-workspace/
+# Claude Code local/personal settings (shared config, if any, goes in .claude/settings.json)
+.claude/settings.local.json

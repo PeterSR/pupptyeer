@@ -1,0 +1,75 @@
+# GoReleaser config for pupptyeer.
+# Ships two static binaries from two modules:
+#   pupptyeer      (root module, ./cmd/pupptyeer)  -> daemon + CLI
+#   pupptyeer-mcp  (the mcp/ module, built with dir) -> MCP stdio/http front-end
+# Validate locally with:  goreleaser check  &&  goreleaser release --snapshot --clean
+version: 2
+
+project_name: pupptyeer
+
+before:
+  hooks:
+    - go mod download
+    - go -C mcp mod download
+
+builds:
+  - id: pupptyeer
+    main: ./cmd/pupptyeer
+    binary: pupptyeer
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: pupptyeer-mcp
+    # Build inside the separate mcp module; its replace directive resolves
+    # ../clients/go from here.
+    dir: mcp
+    main: .
+    binary: pupptyeer-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+# One archive per platform containing both binaries plus docs + license.
+archives:
+  - id: bundle
+    ids: [pupptyeer, pupptyeer-mcp]
+    name_template: "pupptyeer_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - PROTOCOL.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: PeterSR
+    name: pupptyeer
