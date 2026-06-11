@@ -8,7 +8,8 @@ clients** in the same change.
 | Capability | Daemon verb | Go (`clients/go`) | TypeScript (`clients/typescript`) | Python (`clients/python`) |
 |---|---|---|---|---|
 | connect | - | `client.Dial(sock)` | `PupptyeerClient.connect(sock)` | `PupptyeerClient.connect(sock)` |
-| spawn session | `new_session` | `NewSession(cmd,args,cwd,env,cols,rows)` | `newSession({command,args,cwd,env,cols,rows})` | `new_session(command,args,cwd,env,cols,rows)` |
+| spawn session | `new_session` | `NewSession(cmd,args,cwd,env,cols,rows[,opts])` | `newSession({command,args,cwd,env,cols,rows,raw?})` | `new_session(command,args,cwd,env,cols,rows,raw?)` |
+| raw session (no emulator) | `new_session{raw}` | `WithRaw()` option | `newSession({…,raw:true})` | `new_session(…,raw=True)` |
 | list sessions | `list_sessions` | `ListSessions()` | `listSessions()` | `list_sessions()` |
 | attach (stream) | `attach` | `Attach(id,cols,rows)` | `attach(id,{cols,rows})` | `attach(id,cols,rows)` |
 | detach | `detach` | `Detach(id)` | `detach(id)` | `detach(id)` |
@@ -28,3 +29,10 @@ clients** in the same change.
 - **Constants come from [PROTOCOL.md](../PROTOCOL.md)** - never re-derive per client.
 - **Empty session list → `[]`**, never `null`, at every client surface.
 - Run [`/check-parity`](../.claude/skills/check-parity/SKILL.md) (or `conformance/run.sh`) before merging any change that touches a client or the protocol.
+
+## Out of the matrix (optional extensions)
+- **Raw firehose** (`<sock>.raw`, see [PROTOCOL.md](../PROTOCOL.md)) is an optional out-of-band fast
+  path, **not** a parity requirement - like `mcp/tools.go`, it is exempt from this matrix and the
+  conformance suite. The daemon implements it; clients add it only where wanted. Today only the Go
+  client exposes it (`AttachRaw(id) net.Conn`); its absence in TypeScript/Python is **not** a parity
+  break. The in-band `raw:true` session flag above, by contrast, **is** in the matrix.

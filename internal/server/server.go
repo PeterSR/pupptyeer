@@ -24,7 +24,8 @@ const outboundQueue = 256
 // Server accepts connections and routes their multiplexed messages to a
 // shared session registry.
 type Server struct {
-	ln net.Listener
+	ln    net.Listener
+	rawLn net.Listener // optional raw firehose listener (see raw.go); nil if not enabled
 
 	mu       sync.Mutex
 	conns    map[*conn]struct{}
@@ -71,6 +72,9 @@ func (s *Server) Serve() error {
 // Close stops accepting, drops all connections, and kills every session.
 func (s *Server) Close() error {
 	err := s.ln.Close()
+	if s.rawLn != nil {
+		_ = s.rawLn.Close() // stops serveRaw's accept loop
+	}
 	s.mu.Lock()
 	conns := make([]*conn, 0, len(s.conns))
 	for c := range s.conns {
@@ -332,6 +336,10 @@ func (c *conn) handleCapture(m protocol.Message) {
 		budget = time.Duration(m.TimeoutMs) * time.Millisecond
 	}
 	if m.Render {
+		if s.raw {
+			c.sendError(m.ID, m.Session, "rendered capture is unavailable on a raw session (created with raw:true); use capture without render for raw scrollback")
+			return
+		}
 		cols, rows, lines, cur, alt, ok := s.renderWithin(budget)
 		if !ok {
 			c.sendError(m.ID, m.Session, "capture timed out")

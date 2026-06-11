@@ -70,6 +70,14 @@ while (Date.now() < deadline) {
 }
 if (!gone) fail("session still listed after gc");
 
+// raw session: no terminal emulator; raw=true is reflected in SessionInfo.
+const idr = await c.newSession({ command: "cat", cols: 80, rows: 24, raw: true });
+if (!idr) fail("empty raw session id");
+const infor = (await c.listSessions()).find((s) => s.id === idr);
+if (!infor) fail("raw session not listed");
+if (!infor.raw) fail("raw session not flagged raw in list_sessions");
+await c.kill(idr);
+
 c.close();
 b.close();
 console.log("OK ts");

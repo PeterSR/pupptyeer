@@ -54,17 +54,24 @@ type session struct {
 	// activity - only bytes flowing through the PTY do.
 	lastActivity atomic.Int64
 
-	// mu guards ring, attachments, the effective size, and the emulator.
+	// mu guards ring, attachments, rawSubs, the effective size, and the emulator.
 	mu          sync.Mutex
 	ring        *ringBuffer
 	attachments map[*conn]winsize
+	rawSubs     map[*rawConn]struct{} // raw firehose subscribers (see raw.go)
 	effCols     int
 	effRows     int
 
+	// raw sessions skip the terminal emulator entirely (term == nil): no
+	// rendered capture, but no per-byte VT cost on the read/echo hot path.
+	// Set once at construction, read without the lock.
+	raw bool
+
 	// term is a live terminal emulator fed the same bytes as the ring, so
 	// the daemon can answer "what is on the screen" (rendered capture)
-	// authoritatively regardless of ring size. Guarded by mu. cursorVisible
-	// tracks DECTCEM (the emulator exposes visibility only via callback).
+	// authoritatively regardless of ring size. nil for raw sessions.
+	// Guarded by mu. cursorVisible tracks DECTCEM (the emulator exposes
+	// visibility only via callback).
 	term          *vt.Emulator
 	cursorVisible bool
 
@@ -110,24 +117,31 @@ func newSession(srv *Server, p protocol.Message) (*session, error) {
 		created:       time.Now(),
 		cmd:           cmd,
 		pty:           pt,
+		raw:           p.Raw,
 		ring:          newRingBuffer(ringSize),
 		attachments:   make(map[*conn]winsize),
+		rawSubs:       make(map[*rawConn]struct{}),
 		effCols:       cols,
 		effRows:       rows,
-		term:          vt.NewEmulator(cols, rows),
 		cursorVisible: true,
 	}
-	// The emulator surfaces cursor visibility (DECTCEM) only through a
-	// callback; mirror it onto the session. Fired during term.Write, which
-	// the read loop always calls under s.mu, so the field is mu-guarded.
-	s.term.SetCallbacks(vt.Callbacks{
-		CursorVisibility: func(visible bool) { s.cursorVisible = visible },
-	})
+	s.wg.Add(1)
+	if !s.raw {
+		// Non-raw sessions run a live emulator so rendered capture can answer
+		// "what is on the screen". The emulator surfaces cursor visibility
+		// (DECTCEM) only through a callback; mirror it onto the session. Fired
+		// during term.Write, which the read loop always calls under s.mu, so the
+		// field is mu-guarded.
+		s.term = vt.NewEmulator(cols, rows)
+		s.term.SetCallbacks(vt.Callbacks{
+			CursorVisibility: func(visible bool) { s.cursorVisible = visible },
+		})
+		s.wg.Add(1)
+		go s.drainTerm()
+	}
 	s.alive.Store(true)
 	s.lastActivity.Store(s.created.UnixNano())
-	s.wg.Add(2)
 	go s.readLoop()
-	go s.drainTerm()
 	return s, nil
 }
 
@@ -168,6 +182,7 @@ func (s *session) info() protocol.SessionInfo {
 		LastActivity: s.lastActive().UTC().Format(time.RFC3339),
 		Attached:     len(s.attachments),
 		Alive:        s.alive.Load(),
+		Raw:          s.raw,
 	}
 }
 
@@ -182,10 +197,17 @@ func (s *session) readLoop() {
 			copy(chunk, buf[:n])
 			s.mu.Lock()
 			s.ring.append(chunk)
-			_, _ = s.term.Write(chunk) // update the live grid in lockstep with the ring
-			data := protocol.EncodeData(chunk)
-			for c := range s.attachments {
-				c.send(protocol.Message{Type: protocol.TypeOutput, Session: s.id, Data: data})
+			if s.term != nil {
+				_, _ = s.term.Write(chunk) // update the live grid in lockstep with the ring
+			}
+			if len(s.attachments) > 0 {
+				data := protocol.EncodeData(chunk)
+				for c := range s.attachments {
+					c.send(protocol.Message{Type: protocol.TypeOutput, Session: s.id, Data: data})
+				}
+			}
+			for rc := range s.rawSubs {
+				rc.enqueue(chunk) // raw firehose: unframed bytes, no base64/JSON
 			}
 			s.mu.Unlock()
 		}
@@ -211,8 +233,10 @@ func (s *session) finish() {
 		}
 		s.alive.Store(false)
 		// readLoop has stopped, so no more term.Write; closing the emulator
-		// unblocks drainTerm's io.Copy so it can exit.
-		_ = s.term.Close()
+		// unblocks drainTerm's io.Copy so it can exit. nil for raw sessions.
+		if s.term != nil {
+			_ = s.term.Close()
+		}
 
 		s.mu.Lock()
 		conns := make([]*conn, 0, len(s.attachments))
@@ -220,6 +244,11 @@ func (s *session) finish() {
 			conns = append(conns, c)
 		}
 		s.attachments = make(map[*conn]winsize)
+		raws := make([]*rawConn, 0, len(s.rawSubs))
+		for rc := range s.rawSubs {
+			raws = append(raws, rc)
+		}
+		s.rawSubs = make(map[*rawConn]struct{})
 		s.mu.Unlock()
 
 		for _, c := range conns {
@@ -229,6 +258,10 @@ func (s *session) finish() {
 			}
 			c.send(protocol.Message{Type: protocol.TypeSessionClosed, Session: s.id})
 			c.dropSession(s.id)
+		}
+		// Raw firehose has no framing to carry an exit code: EOF is the signal.
+		for _, rc := range raws {
+			rc.shutdown()
 		}
 		s.srv.removeSession(s.id)
 	})
@@ -269,6 +302,27 @@ func (s *session) detach(c *conn) {
 	c.dropSession(s.id)
 }
 
+// attachRaw registers a raw firehose subscriber and replays the current
+// scrollback to it as a single unframed chunk. Held under s.mu - the same lock
+// readLoop holds to fan out live output - so every live chunk is either already
+// in the snapshot or enqueued strictly after it (no gap, no duplication), the
+// same serialisation guarantee attach() relies on. Raw subscribers do not vote
+// on size and do not run the emulator.
+func (s *session) attachRaw(rc *rawConn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rawSubs[rc] = struct{}{}
+	if snapshot := s.ring.snapshot(); len(snapshot) > 0 {
+		rc.enqueue(snapshot)
+	}
+}
+
+func (s *session) detachRaw(rc *rawConn) {
+	s.mu.Lock()
+	delete(s.rawSubs, rc)
+	s.mu.Unlock()
+}
+
 func (s *session) resizeFrom(c *conn, cols, rows int) {
 	s.mu.Lock()
 	if _, ok := s.attachments[c]; ok {
@@ -298,7 +352,9 @@ func (s *session) recomputeSizeLocked() {
 		return
 	}
 	s.effCols, s.effRows = cols, rows
-	s.term.Resize(cols, rows)
+	if s.term != nil {
+		s.term.Resize(cols, rows)
+	}
 	_ = s.pty.Resize(uint16(cols), uint16(rows))
 }
 
@@ -438,29 +494,71 @@ func (s *session) kill() {
 	}
 	// Closing the emulator unblocks readLoop should it ever be parked in
 	// term.Write, so wg.Wait below cannot deadlock. Idempotent with finish().
-	_ = s.term.Close()
+	// nil for raw sessions (no emulator, no drainTerm to unblock).
+	if s.term != nil {
+		_ = s.term.Close()
+	}
 	s.wg.Wait()
 }
 
 func newID() string { return uuid.NewString() }
 
-// ringBuffer keeps the most recent <=max bytes of PTY output.
+// ringBuffer keeps the most recent <=max bytes of PTY output. It grows
+// lazily by append (cheap memory for low-output sessions) until it reaches
+// max, then switches to a fixed circular buffer so appends are O(len(p))
+// instead of recopying the whole window on every chunk - the difference
+// between ~15 and hundreds of MiB/s of sustained PTY output.
 type ringBuffer struct {
-	buf []byte
-	max int
+	buf  []byte // grows until len==max, then fixed-size and used circularly
+	max  int
+	pos  int  // circular write index; meaningful only once full
+	full bool // true once max bytes have been written (buf is the full window)
 }
 
 func newRingBuffer(max int) *ringBuffer { return &ringBuffer{max: max} }
 
 func (r *ringBuffer) append(p []byte) {
+	if r.full {
+		r.appendCircular(p)
+		return
+	}
+	// Growing phase: amortised-O(1) append. On reaching max, compact to the
+	// most recent max bytes once and switch to circular mode (oldest at index
+	// 0, so the next write wraps from 0).
 	r.buf = append(r.buf, p...)
-	if len(r.buf) > r.max {
-		r.buf = append([]byte(nil), r.buf[len(r.buf)-r.max:]...)
+	if len(r.buf) >= r.max {
+		if len(r.buf) > r.max {
+			copy(r.buf, r.buf[len(r.buf)-r.max:])
+			r.buf = r.buf[:r.max]
+		}
+		r.full = true
+		r.pos = 0
 	}
 }
 
+// appendCircular writes p into the full fixed-size buffer, wrapping as needed.
+func (r *ringBuffer) appendCircular(p []byte) {
+	if len(p) >= r.max {
+		copy(r.buf, p[len(p)-r.max:]) // only the last max bytes survive
+		r.pos = 0
+		return
+	}
+	n := copy(r.buf[r.pos:], p)
+	if n < len(p) {
+		copy(r.buf, p[n:]) // wrap the remainder to the front
+	}
+	r.pos = (r.pos + len(p)) % r.max
+}
+
 func (r *ringBuffer) snapshot() []byte {
-	out := make([]byte, len(r.buf))
-	copy(out, r.buf)
+	if !r.full {
+		out := make([]byte, len(r.buf))
+		copy(out, r.buf)
+		return out
+	}
+	// Oldest byte is at pos; reassemble in chronological order.
+	out := make([]byte, r.max)
+	n := copy(out, r.buf[r.pos:])
+	copy(out[n:], r.buf[:r.pos])
 	return out
 }

@@ -96,8 +96,11 @@ export class PupptyeerClient {
     return () => this.eventHandlers.delete(fn);
   }
 
-  async newSession({ command, args = [], cwd = "", env, cols = 80, rows = 24 }) {
-    const r = await this._call({ type: "new_session", command, args, cwd, env, cols, rows });
+  // raw: true creates a session with no terminal emulator on the daemon (lower
+  // CPU/latency); rendered capture (captureScreen) is then unavailable, raw
+  // capturePane still works.
+  async newSession({ command, args = [], cwd = "", env, cols = 80, rows = 24, raw = false }) {
+    const r = await this._call({ type: "new_session", command, args, cwd, env, cols, rows, raw });
     return r.session;
   }
   async listSessions() { return (await this._call({ type: "list_sessions" })).sessions || []; }

@@ -37,6 +37,7 @@ pupptyeer daemon uninstall                   # stop + remove
 
 # drive it
 ./bin/pupptyeer ctl new bash                 # -> <session-id>
+./bin/pupptyeer ctl new --raw bash           # raw/fast session: no terminal emulator (no rendered capture; lower CPU/latency)
 ./bin/pupptyeer ctl list
 ./bin/pupptyeer ctl send <id> $'echo hi\n'
 ./bin/pupptyeer ctl capture <id>             # raw scrollback bytes (ANSI included)
@@ -127,6 +128,23 @@ buffer - so clients never have to embed their own emulator to read a TUI. Either
 `settle_ms` to hold the reply until the PTY has been quiet for that long (the reliable way to read a
 screen after sending input). Rendering reports *what is on the screen*, never what it means; any
 interpretation belongs in the layer above.
+
+## Fast path (opt-in)
+
+The defaults optimise for cross-language ergonomics (one JSON shape, three clients in lockstep) over
+raw speed, and run a terminal emulator per session to power rendered capture. Two opt-ins shed that
+overhead for throughput- or latency-sensitive consumers, leaving the default protocol untouched:
+
+- **Raw sessions** - `new_session` with `raw:true` (or `ctl new --raw`) run no terminal emulator:
+  lower CPU and latency, at the cost of rendered capture (raw scrollback capture still works).
+- **Raw firehose** - an optional second socket at `<sock>.raw`: a transparent, unframed byte pipe to
+  one session's PTY (no base64, no JSON, no framing). Reachable from any language, or from
+  `socat`/`nc`, with no client library; the Go client wraps it as `AttachRaw`. It is out of band and
+  out of the parity matrix (like the MCP tools), so the default socket and protocol are unchanged.
+
+Combined, the fast path streams raw bytes at parity with a lean binary PTY transport (measured around
+320 MiB/s and a ~30µs echo round-trip on Linux), while the default NDJSON path keeps the rich
+features. See [`PROTOCOL.md`](PROTOCOL.md) for the handshake.
 
 ## MCP server
 

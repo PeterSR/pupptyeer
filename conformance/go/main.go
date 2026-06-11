@@ -174,5 +174,34 @@ func main() {
 		fail("session still listed after gc")
 	}
 
+	// raw session: no terminal emulator; raw=true is reflected in SessionInfo.
+	idr, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithRaw())
+	if err != nil {
+		fail("new_session(raw): %v", err)
+	}
+	if idr == "" {
+		fail("empty raw session id")
+	}
+	ssr, err := c.ListSessions()
+	if err != nil {
+		fail("list_sessions(raw): %v", err)
+	}
+	var rawSeen, rawFlagged bool
+	for _, s := range ssr {
+		if s.ID == idr {
+			rawSeen = true
+			rawFlagged = s.Raw
+		}
+	}
+	if !rawSeen {
+		fail("raw session not listed")
+	}
+	if !rawFlagged {
+		fail("raw session not flagged raw in list_sessions")
+	}
+	if err := c.Kill(idr); err != nil {
+		fail("kill(raw): %v", err)
+	}
+
 	fmt.Println("OK go")
 }

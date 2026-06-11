@@ -53,6 +53,7 @@ type Message struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Cols    int               `json:"cols,omitempty"`
 	Rows    int               `json:"rows,omitempty"`
+	Raw     bool              `json:"raw,omitempty"` // new_session: no terminal emulator (no rendered capture; faster)
 
 	// gc
 	MaxIdleSeconds int `json:"max_idle_seconds,omitempty"`
@@ -99,6 +100,7 @@ type SessionInfo struct {
 	LastActivity string   `json:"last_activity"`
 	Attached     int      `json:"attached"`
 	Alive        bool     `json:"alive"`
+	Raw          bool     `json:"raw,omitempty"` // created with raw:true (no terminal emulator)
 }
 
 // EncodeData base64-encodes raw bytes for the `data` field.

@@ -72,6 +72,7 @@ func (p *daemonProgram) Start(s service.Service) error {
 			fmt.Fprintf(os.Stderr, "pupptyeer daemon: serve: %v\n", err)
 		}
 		_ = os.Remove(sock)
+		_ = os.Remove(server.RawSocketPath(sock))
 	}()
 	return nil
 }
@@ -110,6 +111,23 @@ func newDaemon() (*server.Server, string, error) {
 	if err := os.Chmod(sock, 0o600); err != nil {
 		_ = srv.Close()
 		return nil, "", fmt.Errorf("chmod socket: %w", err)
+	}
+
+	// Optional raw firehose: a second socket alongside the main one, mode 0600,
+	// for the out-of-band high-throughput fast path (see internal/server/raw.go).
+	// Additive - the main NDJSON socket above is unaffected.
+	rawSock := server.RawSocketPath(sock)
+	if err := os.Remove(rawSock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = srv.Close()
+		return nil, "", fmt.Errorf("remove stale raw socket: %w", err)
+	}
+	if err := srv.ListenRaw(rawSock); err != nil {
+		_ = srv.Close()
+		return nil, "", fmt.Errorf("listen raw on %s: %w", rawSock, err)
+	}
+	if err := os.Chmod(rawSock, 0o600); err != nil {
+		_ = srv.Close()
+		return nil, "", fmt.Errorf("chmod raw socket: %w", err)
 	}
 	return srv, sock, nil
 }

@@ -27,7 +27,7 @@ A single object shape; `type` discriminates. `id` (int, >0) correlates a request
 ### Client → Server
 | type | fields | reply |
 |---|---|---|
-| `new_session` | `command`, `args?`, `cwd?`, `env?`, `cols`, `rows` | `ok{session}` |
+| `new_session` | `command`, `args?`, `cwd?`, `env?`, `cols`, `rows`, `raw?` | `ok{session}` |
 | `list_sessions` | - | `sessions{sessions[]}` |
 | `attach` | `session`, `cols?`, `rows?` | `attached`, then `output…`, then `scrollback_end` |
 | `detach` | `session` | - |
@@ -42,7 +42,7 @@ A single object shape; `type` discriminates. `id` (int, >0) correlates a request
 `scrollback_end` · `capture{data | cols,rows,lines[],cursor,alt_screen}` · `exit{exit_code}` ·
 `session_closed` · `reaped{sessions[]}`
 
-`SessionInfo`: `{ id, command, args?, cwd?, cols, rows, created(RFC3339), last_activity(RFC3339), attached, alive }`.
+`SessionInfo`: `{ id, command, args?, cwd?, cols, rows, created(RFC3339), last_activity(RFC3339), attached, alive, raw? }`.
 `Cursor` (rendered capture): `{ row, col, visible }`, 0-based; `row` in `[0,rows)`, `col` in `[0,cols]` (`col == cols` is a pending-wrap cursor).
 `last_activity` is the time of the most recent PTY input or output (initialised to `created`).
 An empty session list is normalised to `[]` (never `null`) at the client surface - this applies to
@@ -58,6 +58,29 @@ both `sessions` and `reaped`.
 7. **gc by idle** - `gc` kills every session whose idle time (now − `last_activity`) is **≥** `max_idle_seconds` and returns their `SessionInfo` (snapshotted just before the kill). Idle counts only PTY input/output; attaching or detaching does **not** reset it. `max_idle_seconds` of `0` reaps every session. Reaped sessions emit the usual `session_closed` to any attached clients and leave the registry like a `kill`.
 8. **rendered capture** - `capture_pane` with `render:true` returns the *visible screen* (not scrollback) as the daemon's authoritative terminal grid: `cols`×`rows` (the effective size), `lines[]` (exactly `rows` strings, each padded with spaces to `cols`, no escape sequences), `cursor{row,col,visible}`, and `alt_screen` (true when the program is on the alternate screen buffer). The daemon maintains one live emulator per session, fed the same bytes as the ring, so the grid is correct regardless of ring size. The raw `data` field is **omitted** when `render` is set; `render` omitted/false returns raw scrollback bytes in `data` exactly as before. Rendering carries **no interpretation** - it answers "what is on the screen", never "what it means". The emulator **discards** any replies it would generate to terminal queries the program emits (DSR, device attributes, cursor-position reports): the daemon observes the program's output, it does not answer the program's queries back - that is the attached client's real terminal's job. A program that queries the terminal therefore renders fine and never stalls the session.
 9. **settle read** - `settle_ms > 0` makes `capture_pane` hold its reply until the PTY has produced no output for a continuous `settle_ms` window (snapshot taken once quiet). `settle_ms ≤ 0` snapshots immediately. `timeout_ms` (≤ 0 ⇒ the *capture settle default timeout*) bounds the **whole** capture - the settle wait *and* taking the snapshot; if the snapshot cannot be taken within it the daemon replies `error` rather than hanging the client. Applies to both raw and rendered capture; it only delays this one reply and never blocks the PTY or other connections.
+10. **raw session** - `new_session` with `raw:true` creates a session for which the daemon runs **no terminal emulator**, trading rendered capture for lower per-byte CPU and latency. Effects: `capture_pane` with `render:true` returns `error` (raw scrollback capture without `render` works normally); `SessionInfo.raw` is `true`. Everything else - attach, write, fan-out, resize, scrollback, gc, kill - behaves identically. `raw` omitted/false is the default and is byte-identical to prior behaviour. Independent of the raw firehose below (either can be used without the other).
+
+## Raw firehose (optional extension - NOT part of the parity matrix)
+A throughput/latency fast path for consumers that don't need NDJSON, base64, framing, or rendered
+capture. It is **out of band**: a second unix socket at `<sock>.raw` (mode 0600), alongside the main
+socket; the NDJSON socket and everything above are unchanged. Like `mcp/tools.go`, it is **exempt
+from the client parity matrix and `conformance/run.sh`** - the daemon implements it and clients add it
+only where it's wanted (today: the Go client's `AttachRaw`; `socat`/`nc` work with no client at all).
+
+Per connection, newline-terminated handshake then pure bytes:
+```
+client → "<session-id>\n"
+server → "OK\n"             then: raw scrollback replay, then live PTY bytes (unframed)
+      or  "ERR <message>\n" then: the daemon closes the connection
+```
+After `OK` the stream is a transparent bidirectional pipe to that one session's PTY: bytes the client
+writes go straight to PTY input; bytes the PTY emits stream straight back - no base64, no JSON, no
+framing, no terminal emulation. One session per raw connection (no multiplexing - that is the cost of
+zero framing). A raw client disconnect is a **detach**, not a kill (the session keeps running); when
+the child exits the daemon closes the raw connection (EOF is the only end-of-stream signal - there is
+no exit code on this plane, use the NDJSON connection for control and metadata). Backpressure matches
+the NDJSON path: a raw client that can't keep up is dropped, never stalling the PTY or other clients.
+Pair with a `raw:true` session to also skip terminal emulation for the maximum-throughput path.
 
 ## Conformance
 The canonical scenario every client must pass against a live daemon lives in

@@ -93,6 +93,17 @@ while time.time() < deadline:
 if not gone:
     fail("session still listed after gc")
 
+# raw session: no terminal emulator; raw=true is reflected in SessionInfo.
+sidr = c.new_session(command="cat", cols=80, rows=24, raw=True)
+if not sidr:
+    fail("empty raw session id")
+infor = next((s for s in c.list_sessions() if s["id"] == sidr), None)
+if infor is None:
+    fail("raw session not listed")
+if not infor.get("raw"):
+    fail("raw session not flagged raw in list_sessions")
+c.kill(sidr)
+
 c.close()
 b.close()
 print("OK python")

@@ -9,18 +9,22 @@
 package client
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 )
 
 // Version is the released version of this client, kept in step with the
 // pupptyeer project release (see PROTOCOL.md / git tags).
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Client is a connection to the daemon. Safe for concurrent use.
 type Client struct {
-	nc net.Conn
+	nc         net.Conn
+	socketPath string // retained for AttachRaw, which dials the sibling raw socket
 
 	writeMu sync.Mutex
 	enc     *encoder
@@ -41,11 +45,12 @@ func Dial(socketPath string) (*Client, error) {
 		return nil, err
 	}
 	c := &Client{
-		nc:      nc,
-		enc:     newEncoder(nc),
-		pending: make(map[int]chan Message),
-		events:  make(chan Message, 1024),
-		closed:  make(chan struct{}),
+		nc:         nc,
+		socketPath: socketPath,
+		enc:        newEncoder(nc),
+		pending:    make(map[int]chan Message),
+		events:     make(chan Message, 1024),
+		closed:     make(chan struct{}),
 	}
 	go c.readLoop()
 	return c, nil
@@ -144,12 +149,25 @@ func (c *Client) call(m Message) (Message, error) {
 	}
 }
 
+// SessionOption tunes a NewSession call.
+type SessionOption func(*Message)
+
+// WithRaw creates a raw session: the daemon runs no terminal emulator for it,
+// lowering CPU and latency. Rendered capture (CaptureScreen / capture with
+// render) is unavailable on a raw session; raw scrollback capture still works.
+// Pairs naturally with AttachRaw for a maximally fast path.
+func WithRaw() SessionOption { return func(m *Message) { m.Raw = true } }
+
 // NewSession spawns command in a fresh PTY and returns its session id.
-func (c *Client) NewSession(command string, args []string, cwd string, env map[string]string, cols, rows int) (string, error) {
-	reply, err := c.call(Message{
+func (c *Client) NewSession(command string, args []string, cwd string, env map[string]string, cols, rows int, opts ...SessionOption) (string, error) {
+	m := Message{
 		Type: TypeNewSession, Command: command, Args: args,
 		Cwd: cwd, Env: env, Cols: cols, Rows: rows,
-	})
+	}
+	for _, o := range opts {
+		o(&m)
+	}
+	reply, err := c.call(m)
 	if err != nil {
 		return "", err
 	}
@@ -186,6 +204,54 @@ func (c *Client) Detach(session string) error {
 func (c *Client) WritePane(session string, data []byte) error {
 	return c.send(Message{Type: TypeWritePane, Session: session, Data: EncodeData(data)})
 }
+
+// AttachRaw opens a raw firehose connection to session over the daemon's
+// sibling raw socket (<sock>.raw): an unframed, base64/JSON-free byte pipe to
+// the PTY for throughput/latency-sensitive consumers. Read raw PTY output from
+// the returned conn; write raw input bytes to it. Closing it detaches (it does
+// NOT kill the session); EOF means the session ended.
+//
+// This is an optional fast path, deliberately outside the core NDJSON wire
+// protocol and the client parity matrix (see PROTOCOL.md). It carries no
+// framing, so it streams a single session with no exit code or scrollback
+// marker - use the regular NDJSON connection for control and metadata. Pair it
+// with a session created via WithRaw to also skip terminal emulation.
+func (c *Client) AttachRaw(session string) (net.Conn, error) {
+	nc, err := net.Dial("unix", rawSocketPath(c.socketPath))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := nc.Write([]byte(session + "\n")); err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+	r := bufio.NewReader(nc)
+	status, err := r.ReadString('\n')
+	if err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+	if s := strings.TrimSpace(status); s != "OK" {
+		_ = nc.Close()
+		return nil, fmt.Errorf("raw attach: %s", s)
+	}
+	// Reads go through r so any output bytes buffered past the status line are
+	// preserved; writes go straight to the socket.
+	return &rawConn{Conn: nc, r: r}, nil
+}
+
+// rawConn is the net.Conn returned by AttachRaw. It reads through a buffered
+// reader (to keep bytes read past the handshake) and writes to the raw socket.
+type rawConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (rc *rawConn) Read(p []byte) (int, error) { return rc.r.Read(p) }
+
+// rawSocketPath mirrors the daemon's ".raw" suffix convention (the wire/codec
+// copy pattern: kept in parity with internal/server.RawSocketPath).
+func rawSocketPath(ndjsonSocket string) string { return ndjsonSocket + ".raw" }
 
 // CaptureOption tunes a capture call. Use WithSettle/WithTimeout to wait
 // for the screen to go quiet before snapshotting.

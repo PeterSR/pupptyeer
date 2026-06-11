@@ -44,14 +44,22 @@ func runCtl(args []string) error {
 		return nil
 
 	case "new":
-		if len(args) < 2 {
-			return errors.New("usage: pupptyeer ctl new <command> [args...]")
+		rest := args[1:]
+		var opts []client.SessionOption
+		// Optional --raw flag before the command: no terminal emulator (lower
+		// CPU/latency; rendered capture unavailable).
+		if len(rest) > 0 && rest[0] == "--raw" {
+			opts = append(opts, client.WithRaw())
+			rest = rest[1:]
+		}
+		if len(rest) < 1 {
+			return errors.New("usage: pupptyeer ctl new [--raw] <command> [args...]")
 		}
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
-		id, err := c.NewSession(args[1], args[2:], "", nil, cfg.defaultCols, cfg.defaultRows)
+		id, err := c.NewSession(rest[0], rest[1:], "", nil, cfg.defaultCols, cfg.defaultRows, opts...)
 		if err != nil {
 			return err
 		}

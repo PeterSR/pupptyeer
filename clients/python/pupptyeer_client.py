@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Released version of this client, kept in step with the pupptyeer project
 # release (see PROTOCOL.md / git tags).
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import base64
 import json
@@ -158,10 +158,13 @@ class PupptyeerClient:
         return off
 
     def new_session(self, command: str, args=None, cwd: str = "", env=None,
-                    cols: int = 80, rows: int = 24) -> str:
+                    cols: int = 80, rows: int = 24, raw: bool = False) -> str:
+        # raw=True creates a session with no terminal emulator on the daemon
+        # (lower CPU/latency); rendered capture (capture_screen) is then
+        # unavailable, raw capture_pane still works.
         r = self._call({"type": "new_session", "command": command,
                          "args": args or [], "cwd": cwd, "env": env,
-                         "cols": cols, "rows": rows})
+                         "cols": cols, "rows": rows, "raw": raw})
         return r.get("session", "")
 
     def list_sessions(self) -> list:

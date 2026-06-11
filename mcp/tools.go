@@ -48,7 +48,8 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			mcp.WithArray("args", mcp.Description("command arguments")),
 			mcp.WithString("cwd", mcp.Description("working directory")),
 			mcp.WithInteger("cols", mcp.Description("initial columns (default 80)")),
-			mcp.WithInteger("rows", mcp.Description("initial rows (default 24)"))),
+			mcp.WithInteger("rows", mcp.Description("initial rows (default 24)")),
+			mcp.WithBoolean("raw", mcp.Description("don't run a terminal emulator for this session (lower CPU/latency); read_screen rendered grid is then unavailable, raw scrollback still works. Default false."))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -60,6 +61,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 				Cwd     string   `json:"cwd"`
 				Cols    int      `json:"cols"`
 				Rows    int      `json:"rows"`
+				Raw     bool     `json:"raw"`
 			}
 			if err := r.BindArguments(&a); err != nil {
 				return mcp.NewToolResultErrorf("bad arguments: %v", err), nil
@@ -70,7 +72,11 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if a.Rows == 0 {
 				a.Rows = 24
 			}
-			id, err := c.NewSession(a.Command, a.Args, a.Cwd, nil, a.Cols, a.Rows)
+			var opts []client.SessionOption
+			if a.Raw {
+				opts = append(opts, client.WithRaw())
+			}
+			id, err := c.NewSession(a.Command, a.Args, a.Cwd, nil, a.Cols, a.Rows, opts...)
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
