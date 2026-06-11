@@ -324,15 +324,31 @@ func (c *conn) handleCapture(m protocol.Message) {
 	}
 	// Optionally wait for the screen to go quiet before snapshotting.
 	s.waitSettle(m.SettleMs, m.TimeoutMs)
+	// Bound the snapshot itself by timeout_ms (default 5s) so a wedged read
+	// loop can never hang the client forever; with the emulator drained this
+	// always completes immediately.
+	budget := defaultSettleTimeout
+	if m.TimeoutMs > 0 {
+		budget = time.Duration(m.TimeoutMs) * time.Millisecond
+	}
 	if m.Render {
-		cols, rows, lines, cur, alt := s.renderScreen()
+		cols, rows, lines, cur, alt, ok := s.renderWithin(budget)
+		if !ok {
+			c.sendError(m.ID, m.Session, "capture timed out")
+			return
+		}
 		c.send(protocol.Message{
 			Type: protocol.TypeCapture, ID: m.ID, Session: s.id,
 			Cols: cols, Rows: rows, Lines: lines, Cursor: &cur, AltScreen: alt,
 		})
 		return
 	}
-	c.send(protocol.Message{Type: protocol.TypeCapture, ID: m.ID, Session: s.id, Data: protocol.EncodeData(s.capture())})
+	data, ok := s.captureWithin(budget)
+	if !ok {
+		c.sendError(m.ID, m.Session, "capture timed out")
+		return
+	}
+	c.send(protocol.Message{Type: protocol.TypeCapture, ID: m.ID, Session: s.id, Data: protocol.EncodeData(data)})
 }
 
 func (c *conn) handleKill(m protocol.Message) {

@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -124,9 +125,26 @@ func newSession(srv *Server, p protocol.Message) (*session, error) {
 	})
 	s.alive.Store(true)
 	s.lastActivity.Store(s.created.UnixNano())
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.readLoop()
+	go s.drainTerm()
 	return s, nil
+}
+
+// drainTerm consumes the emulator's response stream. charmbracelet/x/vt
+// answers terminal queries the child emits (DSR, DA, cursor-position reports,
+// in-band resize) by writing the reply into an UNBUFFERED internal pipe; if
+// nothing reads it, term.Write blocks the moment a reply is generated - and
+// readLoop calls term.Write while holding s.mu, so that wedges the whole
+// session and every capture. We discard the replies (the daemon is a passive
+// observer of the child's output, not the terminal answering it back - the
+// attached client's real terminal, if any, does that). The point is solely to
+// keep the pipe empty so term.Write never blocks. A child that queries the
+// terminal at startup (claude does; cat does not) is the trigger. The copy
+// returns when the emulator is closed in finish().
+func (s *session) drainTerm() {
+	defer s.wg.Done()
+	_, _ = io.Copy(io.Discard, s.term)
 }
 
 // touch records I/O activity now. Cheap and lock-free; called on every
@@ -192,6 +210,9 @@ func (s *session) finish() {
 			}
 		}
 		s.alive.Store(false)
+		// readLoop has stopped, so no more term.Write; closing the emulator
+		// unblocks drainTerm's io.Copy so it can exit.
+		_ = s.term.Close()
 
 		s.mu.Lock()
 		conns := make([]*conn, 0, len(s.attachments))
@@ -290,19 +311,50 @@ func (s *session) write(b []byte) error {
 	return err
 }
 
-func (s *session) capture() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.ring.snapshot()
+// lockTimeout acquires s.mu within d, returning false if it cannot. With the
+// emulator drained (drainTerm) the lock is never held long, so this succeeds
+// immediately; it exists so a future readLoop stall can never hang a capture
+// client forever - the caller errors out instead.
+func (s *session) lockTimeout(d time.Duration) bool {
+	if s.mu.TryLock() {
+		return true
+	}
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+		if s.mu.TryLock() {
+			return true
+		}
+	}
+	return false
 }
 
-// renderScreen returns the visible terminal grid: one string per row
+// captureWithin returns the raw scrollback snapshot, or ok=false if s.mu could
+// not be acquired within d.
+func (s *session) captureWithin(d time.Duration) (data []byte, ok bool) {
+	if !s.lockTimeout(d) {
+		return nil, false
+	}
+	defer s.mu.Unlock()
+	return s.ring.snapshot(), true
+}
+
+// renderWithin renders the visible grid (see renderLocked), or ok=false if
+// s.mu could not be acquired within d.
+func (s *session) renderWithin(d time.Duration) (cols, rows int, lines []string, cur protocol.Cursor, alt, ok bool) {
+	if !s.lockTimeout(d) {
+		return 0, 0, nil, protocol.Cursor{}, false, false
+	}
+	defer s.mu.Unlock()
+	cols, rows, lines, cur, alt = s.renderLocked()
+	return cols, rows, lines, cur, alt, true
+}
+
+// renderLocked returns the visible terminal grid: one string per row
 // (space-padded to the width, no escape sequences), the cursor position,
 // and whether the program is on the alternate screen buffer. The grid is
-// the daemon's authoritative screen state, not scrollback.
-func (s *session) renderScreen() (cols, rows int, lines []string, cur protocol.Cursor, alt bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// the daemon's authoritative screen state, not scrollback. Caller holds mu.
+func (s *session) renderLocked() (cols, rows int, lines []string, cur protocol.Cursor, alt bool) {
 	w, h := s.term.Width(), s.term.Height()
 	lines = make([]string, h)
 	buf := make([]rune, 0, w)
@@ -384,6 +436,9 @@ func (s *session) kill() {
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
+	// Closing the emulator unblocks readLoop should it ever be parked in
+	// term.Write, so wg.Wait below cannot deadlock. Idempotent with finish().
+	_ = s.term.Close()
 	s.wg.Wait()
 }
 

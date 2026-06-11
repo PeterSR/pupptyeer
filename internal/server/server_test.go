@@ -330,6 +330,60 @@ func TestRenderedCaptureAndSettle(t *testing.T) {
 	}
 }
 
+// TestCaptureSurvivesTerminalQuery is the regression guard for the wedge a
+// real TUI (claude) triggered: the child emits terminal queries (DSR cursor
+// position / operating status) that the daemon's emulator answers into an
+// unbuffered pipe. If that pipe is not drained, term.Write blocks readLoop
+// under s.mu and every capture hangs. Here the child emits the queries, then
+// stays alive; capture (raw) and captureScreen (render) must both return a
+// successful reply well within a short timeout. Without the drain fix this
+// times out instead of returning.
+func TestCaptureSurvivesTerminalQuery(t *testing.T) {
+	sock := startServer(t)
+	c, err := client.Dial(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	// printf emits "Q", then DSR cursor-position (ESC[6n) and operating-status
+	// (ESC[5n) requests - exactly the kind of startup query a TUI sends and
+	// cat never does - then sleeps so the session stays alive for capture.
+	id, err := c.NewSession("sh", []string{"-c", "printf 'Q\\033[6n\\033[5n'; sleep 30"}, "", nil, 80, 24)
+	if err != nil {
+		t.Fatalf("new_session: %v", err)
+	}
+	defer func() { _ = c.Kill(id) }()
+
+	// Both capture forms must return a successful reply within a short window.
+	// WithSettle holds until the startup query burst has been applied and the
+	// screen is quiet, so the emulator has definitely processed the queries by
+	// the time we snapshot. Each capture runs on a goroutine guarded by a hard
+	// deadline so a regression (a wedged read loop) fails the test cleanly
+	// instead of hanging the suite. Under the bug, capture parks on s.mu and
+	// eventually errors ("capture timed out") well past this deadline.
+	mustReturn := func(what string, run func() error) {
+		done := make(chan error, 1)
+		go func() { done <- run() }()
+		select {
+		case e := <-done:
+			if e != nil {
+				t.Fatalf("%s errored (wedged?): %v", what, e)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s did not return within 3s - session wedged on terminal query", what)
+		}
+	}
+	mustReturn("raw capture", func() error {
+		_, e := c.CapturePane(id, client.WithSettle(200))
+		return e
+	})
+	mustReturn("rendered capture", func() error {
+		_, e := c.CaptureScreen(id, client.WithSettle(200))
+		return e
+	})
+}
+
 func TestProtocolRoundTrip(t *testing.T) {
 	code := 7
 	in := protocol.Message{Type: protocol.TypeExit, Session: "abc", ExitCode: &code}
