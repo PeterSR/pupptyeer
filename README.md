@@ -25,8 +25,15 @@ make install      # install pupptyeer + pupptyeer-mcp into your go bin
 go build -o bin/pupptyeer ./cmd/pupptyeer        # daemon + CLI
 go build -C mcp -o ../bin/pupptyeer-mcp .         # MCP front-end (separate module)
 
-# start the daemon (unix socket; override path with $PUPPTYEER_SOCK)
+# start the daemon in the foreground (unix socket; override path with $PUPPTYEER_SOCK)
 ./bin/pupptyeer daemon &
+
+# or install it as a per-user managed service that starts at login
+# (systemd --user on Linux, a launchd LaunchAgent on macOS, a Windows service)
+pupptyeer daemon install                     # install + start; auto-starts at login
+pupptyeer daemon status                      # not installed | installed, stopped | running
+pupptyeer daemon start | stop | restart      # manage the running service
+pupptyeer daemon uninstall                   # stop + remove
 
 # drive it
 ./bin/pupptyeer ctl new bash                 # -> <session-id>
@@ -56,6 +63,17 @@ Socket path resolution: `$PUPPTYEER_SOCK` → `$XDG_RUNTIME_DIR/pupptyeer/daemon
 on Windows (so the default dir is per-user on every platform). Local only: on Unix the socket dir is
 mode `0700` and the socket `0600`; on Windows, where mode bits are ignored, the daemon installs a
 DACL restricting the socket dir to the current user.
+
+`pupptyeer daemon install` registers the daemon as a **per-user** service (via
+[`kardianos/service`](https://github.com/kardianos/service): systemd `--user`, a launchd LaunchAgent,
+or a Windows service) that starts at login and restarts with exponential backoff if it exits, so the
+socket is always there for the CLI, the MCP server, and the language clients. It runs as you (not
+root), keeping the per-user, local-only socket model intact. Any `PUPPTYEER_SOCK` / `PUPPTYEER_CONFIG`
+set in the shell at install time is baked into the service environment so the service and your CLI
+resolve the same socket; change either and re-run `install`. Linux is verified (on systemd the
+install also wires the unit to `default.target` so it starts at login, and adds a restart-backoff
+drop-in capped at five minutes); macOS (LaunchAgent) and Windows (service) ride the same command but
+are experimental, like the rest of the cross-platform surface.
 
 ## Configuration (optional)
 

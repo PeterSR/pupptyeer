@@ -4,9 +4,10 @@
 //
 // Subcommands:
 //
-//	pupptyeer daemon     run the daemon (unix socket)
-//	pupptyeer ctl ...    drive the daemon from the CLI (list/new/send/...)
-//	pupptyeer version    print the build version
+//	pupptyeer daemon           run the daemon (unix socket)
+//	pupptyeer daemon install   install + start it as a per-user managed service
+//	pupptyeer ctl ...          drive the daemon from the CLI (list/new/send/...)
+//	pupptyeer version          print the build version
 package main
 
 import (
@@ -23,7 +24,10 @@ var version = "dev"
 const usage = `pupptyeer: local PTY session manager
 
 Usage:
-  pupptyeer daemon                 run the daemon
+  pupptyeer daemon                 run the daemon in the foreground
+  pupptyeer daemon install         install + start as a per-user service (auto-start at login)
+  pupptyeer daemon uninstall       stop + remove the service
+  pupptyeer daemon start|stop|restart|status   manage the installed service
   pupptyeer ctl <cmd> [args...]    drive the daemon (list|new|send|capture|attach|resize|kill)
   pupptyeer version
 
@@ -44,7 +48,7 @@ func main() {
 	}
 	switch args[0] {
 	case "daemon":
-		if err := runDaemon(); err != nil {
+		if err := runDaemon(args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "pupptyeer daemon: %v\n", err)
 			os.Exit(1)
 		}

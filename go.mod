@@ -17,6 +17,7 @@ replace github.com/PeterSR/pupptyeer/clients/go => ./clients/go
 
 require (
 	github.com/charmbracelet/x/vt v0.0.0-20260608090822-c3ad58c6c9e5
+	github.com/kardianos/service v1.2.4
 	golang.org/x/sys v0.46.0
 )
 

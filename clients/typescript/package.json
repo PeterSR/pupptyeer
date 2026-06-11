@@ -1,6 +1,6 @@
 {
   "name": "@petersr/pupptyeer-client",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "description": "Thin Node client for the pupptyeer daemon (NDJSON over a unix socket).",
   "type": "module",
   "main": "index.mjs",
