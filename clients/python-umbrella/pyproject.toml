@@ -32,10 +32,10 @@ Issues = "https://github.com/PeterSR/pupptyeer/issues"
 "Real client (pupptyeer-client)" = "https://pypi.org/project/pupptyeer-client/"
 
 [tool.hatch.version]
-path = "pupptyeer/__init__.py"
+path = "pupptyeer.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["pupptyeer"]
+include = ["pupptyeer.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["pupptyeer", "README.md", "LICENSE"]
+include = ["pupptyeer.py", "README.md", "LICENSE"]

@@ -129,7 +129,7 @@ jobs:
         working-directory: clients/python-umbrella
         run: |
           VER="${GITHUB_REF_NAME#v}"
-          GOT="$(python -c 'import re,pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("pupptyeer/__init__.py").read_text()).group(1))')"
+          GOT="$(python -c 'import re,pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("pupptyeer.py").read_text()).group(1))')"
           if [ "$VER" != "$GOT" ]; then
             echo "tag $VER != pupptyeer.__version__ $GOT" >&2
             exit 1

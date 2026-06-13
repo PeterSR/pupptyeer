@@ -72,7 +72,7 @@ long-lived secret, and `--provenance` works out of the box.)
 
 1. Bump the version in all client surfaces (kept in lockstep):
    `clients/typescript/package.json`, `clients/python/pupptyeer_client.py` (`__version__`),
-   `clients/go` (`client.Version`), `clients/python-umbrella/pupptyeer/__init__.py` (`__version__`),
+   `clients/go` (`client.Version`), `clients/python-umbrella/pupptyeer.py` (`__version__`),
    and `npm/pupptyeer/package.json` (its `version` and `optionalDependencies` are also rewritten by
    `npm/build.mjs` at publish). The daemon and `pupptyeer-mcp` are tag-driven via the
    `-X main.version` ldflag and need no manual bump.
