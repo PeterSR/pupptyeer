@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pupptyeer"
+dynamic = ["version"]
+description = "Alias for pupptyeer-client: the Python client for the pupptyeer daemon. Install pupptyeer-client directly."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "PeterSR" }]
+keywords = ["pty", "terminal", "tty", "daemon", "ndjson", "pupptyeer"]
+# The whole point of this package: pull in and re-export the real client.
+dependencies = ["pupptyeer-client>=0.5.0"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Terminals",
+]
+
+[project.urls]
+Homepage = "https://github.com/PeterSR/pupptyeer"
+Repository = "https://github.com/PeterSR/pupptyeer"
+Issues = "https://github.com/PeterSR/pupptyeer/issues"
+"Real client (pupptyeer-client)" = "https://pypi.org/project/pupptyeer-client/"
+
+[tool.hatch.version]
+path = "pupptyeer/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pupptyeer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["pupptyeer", "README.md", "LICENSE"]

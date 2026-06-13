@@ -110,3 +110,35 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: clients/python/dist
+
+  # PyPI: pupptyeer (umbrella alias that re-exports pupptyeer-client).
+  # Its own trusted publisher (PyPI publishers are per-project) for the
+  # `pupptyeer` project; gated on the same PUBLISH_PYPI variable.
+  publish-pypi-umbrella:
+    if: vars.PUBLISH_PYPI == '1'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify __version__ matches the tag
+        working-directory: clients/python-umbrella
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          GOT="$(python -c 'import re,pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("pupptyeer/__init__.py").read_text()).group(1))')"
+          if [ "$VER" != "$GOT" ]; then
+            echo "tag $VER != pupptyeer.__version__ $GOT" >&2
+            exit 1
+          fi
+      - name: Build sdist + wheel
+        working-directory: clients/python-umbrella
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: clients/python-umbrella/dist

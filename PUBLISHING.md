@@ -1,6 +1,6 @@
 # Publishing
 
-pupptyeer ships five public artifacts, all versioned in lockstep with the project release (the
+pupptyeer ships these public artifacts, all versioned in lockstep with the project release (the
 `vX.Y.Z` git tag - see the "client versions move with the release" rule in `CLAUDE.md`):
 
 | Artifact | Registry | Source | Auth (steady state) |
@@ -8,7 +8,11 @@ pupptyeer ships five public artifacts, all versioned in lockstep with the projec
 | GitHub Release (binaries) | GitHub | goreleaser | `GITHUB_TOKEN` (built in) |
 | `pupptyeer-client` | npm | `clients/typescript` | npm OIDC trusted publishing |
 | `pupptyeer-client` | PyPI | `clients/python` | PyPI OIDC trusted publishing |
+| `pupptyeer` (umbrella alias) | PyPI | `clients/python-umbrella` | PyPI OIDC trusted publishing |
 | `pupptyeer` (+ 6 platform pkgs) | npm | `npm/` | npm OIDC trusted publishing |
+
+The PyPI `pupptyeer` is a thin alias that just depends on and re-exports `pupptyeer-client`; it
+exists to hold the bare name. `pupptyeer-client` is the canonical Python package.
 
 The goal is **tokenless** releases via OIDC trusted publishing, driven by `v*` tags through
 `.github/workflows/release.yml`. The publish jobs are gated behind repo variables so the workflow
@@ -26,12 +30,12 @@ is safe to land before the registries are set up:
 PyPI supports a *pending* trusted publisher, so the very first publish can be CI-driven with no
 token:
 
-1. On PyPI: **Your projects -> Publishing -> Add a pending publisher**. Project name
-   `pupptyeer-client`, owner `PeterSR`, repo `pupptyeer`, workflow `release.yml`, environment
-   blank.
+1. On PyPI: **Your projects -> Publishing -> Add a pending publisher**, once per project. Add one
+   for `pupptyeer-client` and one for `pupptyeer` (the umbrella). Both use owner `PeterSR`, repo
+   `pupptyeer`, workflow `release.yml`, environment blank.
 2. Set repo variable `PUBLISH_PYPI=1`.
-3. Tag and push (`git tag v0.5.0 && git push --tags`). The `publish-pypi-client` job builds and
-   uploads; the project is created on first use.
+3. Tag and push (`git tag v0.5.0 && git push --tags`). The `publish-pypi-client` and
+   `publish-pypi-umbrella` jobs build and upload; each project is created on first use.
 
 ### npm - manual first publish, then trusted publishing
 
@@ -66,9 +70,11 @@ long-lived secret, and `--provenance` works out of the box.)
 
 ## Every release after that
 
-1. Bump the version in all three clients (kept in lockstep):
+1. Bump the version in all client surfaces (kept in lockstep):
    `clients/typescript/package.json`, `clients/python/pupptyeer_client.py` (`__version__`),
-   `clients/go` (`client.Version`). The daemon and `pupptyeer-mcp` are tag-driven via the
+   `clients/go` (`client.Version`), `clients/python-umbrella/pupptyeer/__init__.py` (`__version__`),
+   and `npm/pupptyeer/package.json` (its `version` and `optionalDependencies` are also rewritten by
+   `npm/build.mjs` at publish). The daemon and `pupptyeer-mcp` are tag-driven via the
    `-X main.version` ldflag and need no manual bump.
 2. Commit, then `git tag vX.Y.Z && git push origin main --tags`.
 3. The `release` workflow publishes everything. The PyPI job fails fast if `__version__` does not
