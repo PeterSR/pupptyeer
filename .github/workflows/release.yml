@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.25.x"
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
         with:
           version: "~> v2"
           args: release --clean
@@ -38,7 +38,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.25.x"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -90,7 +90,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Verify __version__ matches the tag
@@ -107,7 +107,7 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: clients/python/dist
 
@@ -122,7 +122,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Verify __version__ matches the tag
@@ -139,6 +139,6 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: clients/python-umbrella/dist
