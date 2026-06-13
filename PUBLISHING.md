@@ -9,7 +9,7 @@ pupptyeer ships these public artifacts, all versioned in lockstep with the proje
 | `pupptyeer-client` | npm | `clients/typescript` | npm OIDC trusted publishing |
 | `pupptyeer-client` | PyPI | `clients/python` | PyPI OIDC trusted publishing |
 | `pupptyeer` (umbrella alias) | PyPI | `clients/python-umbrella` | PyPI OIDC trusted publishing |
-| `pupptyeer` (+ 6 platform pkgs) | npm | `npm/` | npm OIDC trusted publishing |
+| `@petersr/pupptyeer` (+ 6 platform pkgs) | npm | `npm/` | npm OIDC trusted publishing |
 
 The PyPI `pupptyeer` is a thin alias that just depends on and re-exports `pupptyeer-client`; it
 exists to hold the bare name. `pupptyeer-client` is the canonical Python package.
@@ -59,9 +59,9 @@ for d in npm/pupptyeer-*/; do ( cd "$d" && npm publish --access public ); done
 
 Then enable OIDC for each package so CI handles every later release:
 
-3. For `pupptyeer-client`, `pupptyeer`, and each `pupptyeer-<os>-<arch>`: on npmjs.com open the
-   package **Settings -> Trusted publishing -> GitHub Actions**, owner `PeterSR`, repo `pupptyeer`,
-   workflow `release.yml`.
+3. For `pupptyeer-client`, `@petersr/pupptyeer`, and each `@petersr/pupptyeer-<os>-<arch>`: on
+   npmjs.com open the package **Settings -> Trusted publishing -> GitHub Actions**, owner `PeterSR`,
+   repo `pupptyeer`, workflow `release.yml`.
 4. Set repo variable `PUBLISH_NPM=1`.
 
 (Prefer a token over OIDC? Skip steps 3-4, add an `NPM_TOKEN` granular automation secret, and set

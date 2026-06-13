@@ -4,12 +4,12 @@
 // its prebuilt binaries. Keep this table in step with ../../platforms.mjs (this
 // copy stays plain CommonJS so the wrapper needs no build step).
 const SUPPORTED = {
-  "linux-x64": "pupptyeer-linux-x64",
-  "linux-arm64": "pupptyeer-linux-arm64",
-  "darwin-x64": "pupptyeer-darwin-x64",
-  "darwin-arm64": "pupptyeer-darwin-arm64",
-  "win32-x64": "pupptyeer-win32-x64",
-  "win32-arm64": "pupptyeer-win32-arm64",
+  "linux-x64": "@petersr/pupptyeer-linux-x64",
+  "linux-arm64": "@petersr/pupptyeer-linux-arm64",
+  "darwin-x64": "@petersr/pupptyeer-darwin-x64",
+  "darwin-arm64": "@petersr/pupptyeer-darwin-arm64",
+  "win32-x64": "@petersr/pupptyeer-win32-x64",
+  "win32-arm64": "@petersr/pupptyeer-win32-arm64",
 };
 
 function platformKey() {

@@ -47,7 +47,8 @@ function writeJson(file, obj) {
 }
 
 for (const p of PLATFORMS) {
-  const pkgDir = join(here, p.pkg);
+  // p.dir is the unscoped filesystem directory; p.pkg is the scoped npm name.
+  const pkgDir = join(here, p.dir);
   const binDir = join(pkgDir, "bin");
   console.log(`==> ${p.pkg} (${p.goos}/${p.goarch})`);
   rmSync(pkgDir, { recursive: true, force: true });

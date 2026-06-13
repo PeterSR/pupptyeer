@@ -16,7 +16,25 @@ programmatically, stream its raw output to a browser terminal (xterm.js), and le
 automated driver share the same live session. Built fresh to prioritise cross-language ergonomics
 + batteries-included over raw throughput.
 
-## Build & run
+## Install
+
+Three ways to get the `pupptyeer` (daemon + CLI) and `pupptyeer-mcp` binaries, easiest first:
+
+```sh
+# 1) prebuilt, via npm (resolves your OS/arch automatically)
+npm i -g @petersr/pupptyeer
+
+# 2) prebuilt, from GitHub Releases - download the archive for your platform and extract:
+#    https://github.com/PeterSR/pupptyeer/releases/latest
+#    pupptyeer_<version>_<os>_<arch>.tar.gz (zip on Windows) - each bundles both binaries.
+
+# 3) from source (needs Go) - see "Build from source" below.
+```
+
+The client libraries are published too: `npm i pupptyeer-client` and `pip install pupptyeer-client`
+(see [Clients](#clients)).
+
+## Build from source
 
 ```sh
 make build        # both binaries into bin/ (or the two `go build` lines below)
@@ -115,9 +133,9 @@ quiet = false
 - **TypeScript / Node**: `npm i pupptyeer-client` (source in `clients/typescript`; zero deps)
 - **Python**: `pip install pupptyeer-client` (source in `clients/python`; stdlib only)
 
-Prefer not to build the Go binary yourself? `npm i -g pupptyeer` installs the prebuilt daemon, CLI,
-and MCP front-end for your platform. See [`PUBLISHING.md`](PUBLISHING.md) for how the packages are
-released.
+Prefer not to build the Go binary yourself? Grab a prebuilt one via `npm i -g @petersr/pupptyeer` or
+straight from [GitHub Releases](https://github.com/PeterSR/pupptyeer/releases/latest) (see
+[Install](#install)). [`PUBLISHING.md`](PUBLISHING.md) documents how every artifact is released.
 
 ## Protocol
 
