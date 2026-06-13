@@ -112,8 +112,12 @@ quiet = false
 ## Clients
 
 - **Go**: `clients/go` (its own zero-dependency module: `import client "github.com/PeterSR/pupptyeer/clients/go"`)
-- **TypeScript / Node**: `clients/typescript` (zero deps; `npm run smoke`)
-- **Python**: `clients/python` (stdlib only; `python3 smoke.py`)
+- **TypeScript / Node**: `npm i pupptyeer-client` (source in `clients/typescript`; zero deps)
+- **Python**: `pip install pupptyeer-client` (source in `clients/python`; stdlib only)
+
+Prefer not to build the Go binary yourself? `npm i -g pupptyeer` installs the prebuilt daemon, CLI,
+and MCP front-end for your platform. See [`PUBLISHING.md`](PUBLISHING.md) for how the packages are
+released.
 
 ## Protocol
 

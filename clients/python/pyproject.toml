@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pupptyeer-client"
+dynamic = ["version"]
+description = "Thin Python client for the pupptyeer daemon (NDJSON over a unix socket)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "PeterSR" }]
+keywords = ["pty", "terminal", "tty", "daemon", "ndjson", "pupptyeer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Terminals",
+]
+
+[project.urls]
+Homepage = "https://github.com/PeterSR/pupptyeer"
+Repository = "https://github.com/PeterSR/pupptyeer"
+Issues = "https://github.com/PeterSR/pupptyeer/issues"
+Protocol = "https://github.com/PeterSR/pupptyeer/blob/main/PROTOCOL.md"
+
+# Single source of truth for the version: the module's __version__, kept in
+# lockstep with the project release (see CLAUDE.md "client versions move with
+# the release").
+[tool.hatch.version]
+path = "pupptyeer_client.py"
+
+# Single-module package: ship just pupptyeer_client.py (smoke.py and caches stay out).
+[tool.hatch.build.targets.wheel]
+include = ["pupptyeer_client.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["pupptyeer_client.py", "README.md", "LICENSE"]
