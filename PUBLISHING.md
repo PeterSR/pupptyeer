@@ -30,7 +30,7 @@ token:
    `pupptyeer-client`, owner `PeterSR`, repo `pupptyeer`, workflow `release.yml`, environment
    blank.
 2. Set repo variable `PUBLISH_PYPI=1`.
-3. Tag and push (`git tag v0.4.0 && git push --tags`). The `publish-pypi-client` job builds and
+3. Tag and push (`git tag v0.5.0 && git push --tags`). The `publish-pypi-client` job builds and
    uploads; the project is created on first use.
 
 ### npm - manual first publish, then trusted publishing
@@ -48,7 +48,7 @@ cd -
 
 # 2) the binary wrapper - build the per-platform packages first (needs Go), then
 #    publish the 6 platform packages before the meta package that depends on them.
-node npm/build.mjs 0.4.0          # use the real version
+node npm/build.mjs 0.5.0          # use the real version
 for d in npm/pupptyeer-*/; do ( cd "$d" && npm publish --access public ); done
 ( cd npm/pupptyeer && npm publish --access public )
 ```
@@ -86,7 +86,7 @@ cd clients/python && python -m build && python -m twine check dist/*
 # Binary wrapper: build all platform packages, then exercise the launcher.
 # Install the host-platform package locally so require.resolve can find it
 # (a real `npm i pupptyeer` gets it via optionalDependencies).
-node npm/build.mjs 0.4.0
+node npm/build.mjs 0.5.0
 cd npm/pupptyeer && npm i ../pupptyeer-linux-x64 --no-save   # match your host os/arch
 node bin/pupptyeer.cjs version                               # resolves + execs the binary
 ```
