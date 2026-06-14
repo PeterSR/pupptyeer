@@ -10,6 +10,8 @@ clients** in the same change.
 | connect | - | `client.Dial(sock)` | `PupptyeerClient.connect(sock)` | `PupptyeerClient.connect(sock)` |
 | spawn session | `new_session` | `NewSession(cmd,args,cwd,env,cols,rows[,opts])` | `newSession({command,args,cwd,env,cols,rows,raw?})` | `new_session(command,args,cwd,env,cols,rows,raw?)` |
 | raw session (no emulator) | `new_session{raw}` | `WithRaw()` option | `newSession({…,raw:true})` | `new_session(…,raw=True)` |
+| caller-supplied id | `new_session{requested_id,get_or_create}` | `WithSessionID(id)` / `WithGetOrCreate()` options | `newSession({…,requestedId,getOrCreate})` | `new_session(…,requested_id=…,get_or_create=…)` |
+| ensure (continue or create) | `new_session{requested_id,get_or_create}` | `EnsureSession(id,cmd,…)` | `ensureSession({id,command,…})` | `ensure_session(session_id,command,…)` |
 | list sessions | `list_sessions` | `ListSessions()` | `listSessions()` | `list_sessions()` |
 | attach (stream) | `attach` | `Attach(id,cols,rows)` | `attach(id,{cols,rows})` | `attach(id,cols,rows)` |
 | detach | `detach` | `Detach(id)` | `detach(id)` | `detach(id)` |

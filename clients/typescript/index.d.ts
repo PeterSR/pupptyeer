@@ -40,6 +40,24 @@ export interface NewSessionOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  /** Run no terminal emulator (lower CPU/latency); rendered capture is then unavailable. */
+  raw?: boolean;
+  /** Use this string as the session id instead of a daemon-generated UUID. */
+  requestedId?: string;
+  /** When an alive session already holds requestedId, return it as-is (continuation) instead of erroring. */
+  getOrCreate?: boolean;
+}
+
+export interface EnsureSessionOptions {
+  /** The session id to continue or create. */
+  id: string;
+  command: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  cols?: number;
+  rows?: number;
+  raw?: boolean;
 }
 
 export interface AttachOptions {
@@ -91,6 +109,14 @@ export class PupptyeerClient {
 
   /** Spawn command in a fresh PTY; resolves to the new session id. */
   newSession(opts: NewSessionOptions): Promise<string>;
+
+  /**
+   * Continue if alive, else create: if an alive session already holds
+   * opts.id it is returned (resolves false); otherwise a new session is
+   * spawned with that id (resolves true). command/args/cwd/env/cols/rows are
+   * used only when a session is actually created.
+   */
+  ensureSession(opts: EnsureSessionOptions): Promise<boolean>;
 
   /** List metadata for all live sessions. */
   listSessions(): Promise<SessionInfo[]>;

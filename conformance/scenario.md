@@ -20,8 +20,10 @@ Each runner uses a unique marker (`<LANG>-<nanotime>`) and `$PUPPTYEER_SOCK`.
 12. **rendered capture + settle**: `new_session` running `sh -c "printf 'A\033[1;10HB'; sleep 2"` at 80×24 (`id3`). This prints `A` at column 1, moves the cursor to row 1 column 10, then prints `B` - so a naive ANSI strip would collapse it to `AB`. Call the **rendered** capture with a **settle** of 200ms (timeout 2000ms). Assert the grid is 80×24 with 24 lines and `lines[0]` is `A` + 8 spaces + `B` (i.e. `B` at index 9), proving the daemon applied the cursor move instead of stripping it. Then **kill** `id3`.
 13. **gc**: `new_session` a second `cat` (`id2`), then `gc(0)` → the returned reaped list includes `id2`, and within 2s `list_sessions` no longer includes `id2`.
 14. **raw session**: `new_session` running `cat` with `raw:true` (`id4`) → assert a non-empty id and that its `SessionInfo` in `list_sessions` reports `raw == true`. Then **kill** `id4`.
-15. print `OK <lang>` and exit 0. Any failed assertion → print `FAIL[<lang>] …` and exit non-zero.
+15. **caller-supplied id**: `new_session` running `cat` with `requested_id = "conf-<marker>"` (`id5`) → assert the returned id **equals** the requested id. Then `new_session` again with the **same** `requested_id` and `get_or_create:true` → assert it returns the **same** id (continuation, no new process). Then `new_session` once more with the same `requested_id` **without** `get_or_create` → assert it **errors** (a live clash). Then **kill** `id5`.
+16. print `OK <lang>` and exit 0. Any failed assertion → print `FAIL[<lang>] …` and exit non-zero.
 
 This exercises: server-assigned ids, attach/stream, write+echo, capture, list, detach,
-persistence, reattach replay, kill+reap, rendered capture + settle, and gc-by-idle - i.e. the
-whole verb set and the load-bearing semantics from [PROTOCOL.md](../PROTOCOL.md).
+persistence, reattach replay, kill+reap, rendered capture + settle, gc-by-idle, and
+caller-supplied ids with get-or-create continuation - i.e. the whole verb set and the
+load-bearing semantics from [PROTOCOL.md](../PROTOCOL.md).

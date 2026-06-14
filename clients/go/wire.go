@@ -55,6 +55,12 @@ type Message struct {
 	Rows    int               `json:"rows,omitempty"`
 	Raw     bool              `json:"raw,omitempty"` // new_session: no terminal emulator (no rendered capture; faster)
 
+	// new_session, caller-supplied id. RequestedID, if set, becomes the
+	// session's id instead of a daemon UUID; with GetOrCreate an alive session
+	// already holding it is returned as-is (continuation).
+	RequestedID string `json:"requested_id,omitempty"`
+	GetOrCreate bool   `json:"get_or_create,omitempty"`
+
 	// gc
 	MaxIdleSeconds int `json:"max_idle_seconds,omitempty"`
 

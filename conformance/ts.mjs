@@ -78,6 +78,19 @@ if (!infor) fail("raw session not listed");
 if (!infor.raw) fail("raw session not flagged raw in list_sessions");
 await c.kill(idr);
 
+// caller-supplied id: requested_id becomes the session id; a second create with
+// get_or_create continues it; a clash without get_or_create errors.
+const wantId = "conf-" + marker;
+const id5 = await c.newSession({ command: "cat", cols: 80, rows: 24, requestedId: wantId });
+if (id5 !== wantId) fail(`requested_id not honoured: got ${id5} want ${wantId}`);
+const again = await c.newSession({ command: "cat", cols: 80, rows: 24, requestedId: wantId, getOrCreate: true });
+if (again !== wantId) fail(`get_or_create did not continue: got ${again} want ${wantId}`);
+let clashed = false;
+try { await c.newSession({ command: "cat", cols: 80, rows: 24, requestedId: wantId }); }
+catch { clashed = true; }
+if (!clashed) fail("clash without get_or_create did not error");
+await c.kill(id5);
+
 c.close();
 b.close();
 console.log("OK ts");
