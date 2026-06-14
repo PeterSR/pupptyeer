@@ -10,6 +10,7 @@ pupptyeer ships these public artifacts, all versioned in lockstep with the proje
 | `pupptyeer-client` | PyPI | `clients/python` | PyPI OIDC trusted publishing |
 | `pupptyeer` (umbrella alias) | PyPI | `clients/python-umbrella` | PyPI OIDC trusted publishing |
 | `@petersr/pupptyeer` (+ 6 platform pkgs) | npm | `npm/` | npm OIDC trusted publishing |
+| `clients/go` (Go module) | GitHub (git tag) | `clients/go/` | `clients/go/vX.Y.Z` tag, pushed automatically by `release.yml` |
 
 The PyPI `pupptyeer` is a thin alias that just depends on and re-exports `pupptyeer-client`; it
 exists to hold the bare name. `pupptyeer-client` is the canonical Python package.
@@ -78,7 +79,9 @@ long-lived secret, and `--provenance` works out of the box.)
    `-X main.version` ldflag and need no manual bump.
 2. Commit, then `git tag vX.Y.Z && git push origin main --tags`.
 3. The `release` workflow publishes everything. The PyPI job fails fast if `__version__` does not
-   equal the tag.
+   equal the tag. The `tag-go-client` job also creates and pushes `clients/go/vX.Y.Z` at the same
+   commit so external Go consumers can pin `github.com/PeterSR/pupptyeer/clients/go@vX.Y.Z` (Go
+   resolves a subdirectory module from the prefixed tag, not the root `vX.Y.Z`).
 
 ## Local validation (no upload)
 

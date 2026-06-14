@@ -142,3 +142,28 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: clients/python-umbrella/dist
+
+  # Go: tag the clients/go submodule so external consumers can pin a clean
+  # version. Go resolves github.com/PeterSR/pupptyeer/clients/go@vX.Y.Z from a
+  # `clients/go/vX.Y.Z` tag, NOT the root `vX.Y.Z` tag, so without this a
+  # consumer is stuck on a pseudo-version. This tag does not match the `v*`
+  # trigger above, so pushing it does not re-run the release workflow.
+  tag-go-client:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Create and push clients/go/<tag> at the released commit
+        run: |
+          TAG="clients/go/${GITHUB_REF_NAME}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists on origin; nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$GITHUB_SHA" -m "clients/go ${GITHUB_REF_NAME}"
+          git push origin "$TAG"
