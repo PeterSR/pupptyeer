@@ -403,3 +403,61 @@ func TestProtocolRoundTrip(t *testing.T) {
 		t.Fatalf("round trip mismatch: %+v", out)
 	}
 }
+
+// TestBringYourOwnSessionID covers caller-supplied ids and get-or-create:
+// the requested id is honoured, a clash without get_or_create errors, and
+// get_or_create returns the same live session instead of spawning another.
+func TestBringYourOwnSessionID(t *testing.T) {
+	sock := startServer(t)
+	c, err := client.Dial(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	const id = "my-fixed-id"
+	got, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(id))
+	if err != nil {
+		t.Fatalf("new_session with id: %v", err)
+	}
+	if got != id {
+		t.Fatalf("session id = %q, want %q", got, id)
+	}
+
+	// Clash without get_or_create is an error.
+	if _, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(id)); err == nil {
+		t.Fatal("expected error creating a session with a live duplicate id")
+	}
+
+	// get_or_create returns the same id and does NOT spawn a second session.
+	got2, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(id), client.WithGetOrCreate())
+	if err != nil {
+		t.Fatalf("get_or_create: %v", err)
+	}
+	if got2 != id {
+		t.Fatalf("get_or_create id = %q, want %q", got2, id)
+	}
+	infos, err := c.ListSessions()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("session count = %d, want 1 (get_or_create must not spawn a duplicate)", len(infos))
+	}
+
+	// EnsureSession: existing alive id -> created=false; fresh id -> created=true.
+	created, err := c.EnsureSession(id, "cat", nil, "", nil, 80, 24)
+	if err != nil {
+		t.Fatalf("EnsureSession existing: %v", err)
+	}
+	if created {
+		t.Error("EnsureSession on a live id should report created=false")
+	}
+	created, err = c.EnsureSession("another-id", "cat", nil, "", nil, 80, 24)
+	if err != nil {
+		t.Fatalf("EnsureSession fresh: %v", err)
+	}
+	if !created {
+		t.Error("EnsureSession on a fresh id should report created=true")
+	}
+}

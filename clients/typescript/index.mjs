@@ -99,9 +99,22 @@ export class PupptyeerClient {
   // raw: true creates a session with no terminal emulator on the daemon (lower
   // CPU/latency); rendered capture (captureScreen) is then unavailable, raw
   // capturePane still works.
-  async newSession({ command, args = [], cwd = "", env, cols = 80, rows = 24, raw = false }) {
-    const r = await this._call({ type: "new_session", command, args, cwd, env, cols, rows, raw });
+  // requestedId: use this string as the session id instead of a daemon UUID.
+  // getOrCreate: when an alive session already holds requestedId, return it as
+  // is (continuation) instead of erroring on the clash.
+  async newSession({ command, args = [], cwd = "", env, cols = 80, rows = 24, raw = false, requestedId = "", getOrCreate = false }) {
+    const r = await this._call({ type: "new_session", command, args, cwd, env, cols, rows, raw, requested_id: requestedId, get_or_create: getOrCreate });
     return r.session;
+  }
+  // ensureSession is "continue if alive, else create": if an alive session
+  // already holds id it is returned (returns false); otherwise a new session is
+  // spawned with that id (returns true). command/args/cwd/env/cols/rows are used
+  // only when a session is actually created.
+  async ensureSession({ id, command, args = [], cwd = "", env, cols = 80, rows = 24, raw = false }) {
+    const sessions = await this.listSessions();
+    if (sessions.find((s) => s.id === id && s.alive)) return false;
+    await this.newSession({ command, args, cwd, env, cols, rows, raw, requestedId: id, getOrCreate: true });
+    return true;
   }
   async listSessions() { return (await this._call({ type: "list_sessions" })).sessions || []; }
   async attach(session, { cols = 0, rows = 0 } = {}) { await this._call({ type: "attach", session, cols, rows }); }

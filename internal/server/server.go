@@ -94,15 +94,31 @@ func (s *Server) Close() error {
 	return err
 }
 
-func (s *Server) addSession(sess *session) {
+// addSession registers sess and returns the session now mapped to its id. If a
+// live session already holds the id (a concurrent create with the same
+// requested_id raced us), it is NOT overwritten and that existing session is
+// returned instead; the caller must discard the loser it just spawned. A dead
+// session under the same id is replaced (caller-supplied ids are reusable).
+func (s *Server) addSession(sess *session) *session {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.sessions[sess.id]; ok && cur.core.Alive() {
+		return cur
+	}
 	s.sessions[sess.id] = sess
-	s.mu.Unlock()
+	return sess
 }
 
-func (s *Server) removeSession(id string) {
+// removeSession deregisters sess, but only if the registry still maps its id to
+// THIS session. Caller-supplied ids are reusable, so a session can die while a
+// newer session already holds the same id; a blind delete-by-id would evict the
+// live newcomer and orphan its PTY. The identity check makes the dying session's
+// onExit a no-op in that case.
+func (s *Server) removeSession(sess *session) {
 	s.mu.Lock()
-	delete(s.sessions, id)
+	if s.sessions[sess.id] == sess {
+		delete(s.sessions, sess.id)
+	}
 	s.mu.Unlock()
 }
 
@@ -279,12 +295,34 @@ func (c *conn) dispatch(m protocol.Message) {
 }
 
 func (c *conn) handleNewSession(m protocol.Message) {
+	// Caller-supplied id: with GetOrCreate, an alive session already holding
+	// the id is returned as-is (continuation); without it, a live clash errors.
+	if m.RequestedID != "" {
+		if existing := c.srv.getSession(m.RequestedID); existing != nil && existing.core.Alive() {
+			if !m.GetOrCreate {
+				c.sendError(m.ID, m.RequestedID, "session id already exists")
+				return
+			}
+			c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Session: existing.id})
+			return
+		}
+	}
 	s, err := newSession(c.srv, m)
 	if err != nil {
 		c.sendError(m.ID, "", err.Error())
 		return
 	}
-	c.srv.addSession(s)
+	if winner := c.srv.addSession(s); winner != s {
+		// A concurrent create with the same requested_id beat us to the
+		// registry. Discard our just-spawned duplicate so we don't orphan a
+		// live PTY, then honour the same get_or_create semantics as the top.
+		s.kill()
+		if !m.GetOrCreate {
+			c.sendError(m.ID, m.RequestedID, "session id already exists")
+			return
+		}
+		s = winner
+	}
 	c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Session: s.id})
 }
 
@@ -326,34 +364,31 @@ func (c *conn) handleCapture(m protocol.Message) {
 		c.sendError(m.ID, m.Session, "session not found")
 		return
 	}
-	// Optionally wait for the screen to go quiet before snapshotting.
-	s.waitSettle(m.SettleMs, m.TimeoutMs)
-	// Bound the snapshot itself by timeout_ms (default 5s) so a wedged read
-	// loop can never hang the client forever; with the emulator drained this
-	// always completes immediately.
-	budget := defaultSettleTimeout
-	if m.TimeoutMs > 0 {
-		budget = time.Duration(m.TimeoutMs) * time.Millisecond
-	}
+	// Optionally wait for the screen to go quiet before snapshotting, then
+	// snapshot under a bound so a wedged read loop can never hang the client
+	// forever (with the emulator drained this always completes immediately).
+	settle := time.Duration(m.SettleMs) * time.Millisecond
+	timeout := time.Duration(m.TimeoutMs) * time.Millisecond
 	if m.Render {
-		if s.raw {
+		if s.core.Raw() {
 			c.sendError(m.ID, m.Session, "rendered capture is unavailable on a raw session (created with raw:true); use capture without render for raw scrollback")
 			return
 		}
-		cols, rows, lines, cur, alt, ok := s.renderWithin(budget)
-		if !ok {
-			c.sendError(m.ID, m.Session, "capture timed out")
+		scr, err := s.core.CaptureScreen(settle, timeout)
+		if err != nil {
+			c.sendError(m.ID, m.Session, err.Error())
 			return
 		}
+		cur := protocol.Cursor{Row: scr.Cursor.Row, Col: scr.Cursor.Col, Visible: scr.Cursor.Visible}
 		c.send(protocol.Message{
 			Type: protocol.TypeCapture, ID: m.ID, Session: s.id,
-			Cols: cols, Rows: rows, Lines: lines, Cursor: &cur, AltScreen: alt,
+			Cols: scr.Cols, Rows: scr.Rows, Lines: scr.Lines, Cursor: &cur, AltScreen: scr.AltScreen,
 		})
 		return
 	}
-	data, ok := s.captureWithin(budget)
-	if !ok {
-		c.sendError(m.ID, m.Session, "capture timed out")
+	data, err := s.core.CaptureRaw(settle, timeout)
+	if err != nil {
+		c.sendError(m.ID, m.Session, err.Error())
 		return
 	}
 	c.send(protocol.Message{Type: protocol.TypeCapture, ID: m.ID, Session: s.id, Data: protocol.EncodeData(data)})

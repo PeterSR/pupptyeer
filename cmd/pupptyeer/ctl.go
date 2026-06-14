@@ -46,14 +46,31 @@ func runCtl(args []string) error {
 	case "new":
 		rest := args[1:]
 		var opts []client.SessionOption
-		// Optional --raw flag before the command: no terminal emulator (lower
-		// CPU/latency; rendered capture unavailable).
-		if len(rest) > 0 && rest[0] == "--raw" {
-			opts = append(opts, client.WithRaw())
-			rest = rest[1:]
+		// Optional flags before the command:
+		//   --raw            no terminal emulator (lower CPU/latency; rendered capture unavailable)
+		//   --id <id>        use <id> as the session id instead of a daemon UUID
+		//   --get-or-create  with --id, continue an alive session that holds it instead of erroring
+		for len(rest) > 0 {
+			switch {
+			case rest[0] == "--raw":
+				opts = append(opts, client.WithRaw())
+				rest = rest[1:]
+			case rest[0] == "--get-or-create":
+				opts = append(opts, client.WithGetOrCreate())
+				rest = rest[1:]
+			case rest[0] == "--id":
+				if len(rest) < 2 {
+					return errors.New("usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] <command> [args...]")
+				}
+				opts = append(opts, client.WithSessionID(rest[1]))
+				rest = rest[2:]
+			default:
+				goto flagsDone
+			}
 		}
+	flagsDone:
 		if len(rest) < 1 {
-			return errors.New("usage: pupptyeer ctl new [--raw] <command> [args...]")
+			return errors.New("usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] <command> [args...]")
 		}
 		cfg, err := loadConfig()
 		if err != nil {

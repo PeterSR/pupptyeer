@@ -49,19 +49,23 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			mcp.WithString("cwd", mcp.Description("working directory")),
 			mcp.WithInteger("cols", mcp.Description("initial columns (default 80)")),
 			mcp.WithInteger("rows", mcp.Description("initial rows (default 24)")),
-			mcp.WithBoolean("raw", mcp.Description("don't run a terminal emulator for this session (lower CPU/latency); read_screen rendered grid is then unavailable, raw scrollback still works. Default false."))),
+			mcp.WithBoolean("raw", mcp.Description("don't run a terminal emulator for this session (lower CPU/latency); read_screen rendered grid is then unavailable, raw scrollback still works. Default false.")),
+			mcp.WithString("requested_id", mcp.Description("use this string as the session id instead of a daemon-generated UUID. If an alive session already holds it, this errors unless get_or_create is set.")),
+			mcp.WithBoolean("get_or_create", mcp.Description("when an alive session already holds requested_id, return that existing session as-is (continuation: same id, same live program) instead of erroring. Default false."))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
 				return mcp.NewToolResultErrorf("daemon not reachable: %v", err), nil
 			}
 			var a struct {
-				Command string   `json:"command"`
-				Args    []string `json:"args"`
-				Cwd     string   `json:"cwd"`
-				Cols    int      `json:"cols"`
-				Rows    int      `json:"rows"`
-				Raw     bool     `json:"raw"`
+				Command     string   `json:"command"`
+				Args        []string `json:"args"`
+				Cwd         string   `json:"cwd"`
+				Cols        int      `json:"cols"`
+				Rows        int      `json:"rows"`
+				Raw         bool     `json:"raw"`
+				RequestedID string   `json:"requested_id"`
+				GetOrCreate bool     `json:"get_or_create"`
 			}
 			if err := r.BindArguments(&a); err != nil {
 				return mcp.NewToolResultErrorf("bad arguments: %v", err), nil
@@ -75,6 +79,12 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			var opts []client.SessionOption
 			if a.Raw {
 				opts = append(opts, client.WithRaw())
+			}
+			if a.RequestedID != "" {
+				opts = append(opts, client.WithSessionID(a.RequestedID))
+			}
+			if a.GetOrCreate {
+				opts = append(opts, client.WithGetOrCreate())
 			}
 			id, err := c.NewSession(a.Command, a.Args, a.Cwd, nil, a.Cols, a.Rows, opts...)
 			if err != nil {

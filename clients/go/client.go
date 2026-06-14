@@ -19,7 +19,7 @@ import (
 
 // Version is the released version of this client, kept in step with the
 // pupptyeer project release (see PROTOCOL.md / git tags).
-const Version = "0.5.1"
+const Version = "0.6.0"
 
 // Client is a connection to the daemon. Safe for concurrent use.
 type Client struct {
@@ -158,6 +158,16 @@ type SessionOption func(*Message)
 // Pairs naturally with AttachRaw for a maximally fast path.
 func WithRaw() SessionOption { return func(m *Message) { m.Raw = true } }
 
+// WithSessionID requests that the new session use id instead of a
+// daemon-generated UUID. Without WithGetOrCreate, creating a session whose id
+// is already live is an error.
+func WithSessionID(id string) SessionOption { return func(m *Message) { m.RequestedID = id } }
+
+// WithGetOrCreate makes NewSession return an existing alive session that holds
+// the requested id (set via WithSessionID) instead of spawning a new process.
+// It is the building block for continuation: same id, same live program.
+func WithGetOrCreate() SessionOption { return func(m *Message) { m.GetOrCreate = true } }
+
 // NewSession spawns command in a fresh PTY and returns its session id.
 func (c *Client) NewSession(command string, args []string, cwd string, env map[string]string, cols, rows int, opts ...SessionOption) (string, error) {
 	m := Message{
@@ -172,6 +182,29 @@ func (c *Client) NewSession(command string, args []string, cwd string, env map[s
 		return "", err
 	}
 	return reply.Session, nil
+}
+
+// EnsureSession attaches to the semantics of "continue if alive, else create":
+// if an alive session already holds id it is returned (created=false); otherwise
+// a new session is spawned with that id (created=true). It is a thin wrapper over
+// NewSession with WithSessionID + WithGetOrCreate. command/args/cwd/env/cols/rows
+// are used only when a session is actually created.
+func (c *Client) EnsureSession(id, command string, args []string, cwd string, env map[string]string, cols, rows int, opts ...SessionOption) (created bool, err error) {
+	infos, err := c.ListSessions()
+	if err != nil {
+		return false, err
+	}
+	for _, info := range infos {
+		if info.ID == id && info.Alive {
+			return false, nil
+		}
+	}
+	opts = append(opts, WithSessionID(id), WithGetOrCreate())
+	_, err = c.NewSession(command, args, cwd, env, cols, rows, opts...)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListSessions returns metadata for all live sessions.

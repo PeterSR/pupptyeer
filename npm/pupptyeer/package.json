@@ -1,6 +1,6 @@
 {
   "name": "@petersr/pupptyeer",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Install the pupptyeer daemon, CLI, and MCP front-end as a prebuilt binary for your platform.",
   "bin": {
     "pupptyeer": "bin/pupptyeer.cjs",
@@ -34,12 +34,12 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@petersr/pupptyeer-linux-x64": "0.5.1",
-    "@petersr/pupptyeer-linux-arm64": "0.5.1",
-    "@petersr/pupptyeer-darwin-x64": "0.5.1",
-    "@petersr/pupptyeer-darwin-arm64": "0.5.1",
-    "@petersr/pupptyeer-win32-x64": "0.5.1",
-    "@petersr/pupptyeer-win32-arm64": "0.5.1"
+    "@petersr/pupptyeer-linux-x64": "0.6.0",
+    "@petersr/pupptyeer-linux-arm64": "0.6.0",
+    "@petersr/pupptyeer-darwin-x64": "0.6.0",
+    "@petersr/pupptyeer-darwin-arm64": "0.6.0",
+    "@petersr/pupptyeer-win32-x64": "0.6.0",
+    "@petersr/pupptyeer-win32-arm64": "0.6.0"
   },
   "publishConfig": {
     "access": "public"

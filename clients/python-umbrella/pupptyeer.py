@@ -14,6 +14,6 @@ directly; this package exists so the bare ``pupptyeer`` name resolves too.
 from pupptyeer_client import Cursor, PupptyeerClient, Screen
 
 # Kept in step with the pupptyeer project release (see PROTOCOL.md / git tags).
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 __all__ = ["PupptyeerClient", "Screen", "Cursor"]

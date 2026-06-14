@@ -104,6 +104,25 @@ if not infor.get("raw"):
     fail("raw session not flagged raw in list_sessions")
 c.kill(sidr)
 
+# caller-supplied id: requested_id becomes the session id; a second create with
+# get_or_create continues it; a clash without get_or_create errors.
+want_id = "conf-" + marker.decode()
+sid5 = c.new_session(command="cat", cols=80, rows=24, requested_id=want_id)
+if sid5 != want_id:
+    fail("requested_id not honoured: got %r want %r" % (sid5, want_id))
+again = c.new_session(command="cat", cols=80, rows=24, requested_id=want_id,
+                      get_or_create=True)
+if again != want_id:
+    fail("get_or_create did not continue: got %r want %r" % (again, want_id))
+clashed = False
+try:
+    c.new_session(command="cat", cols=80, rows=24, requested_id=want_id)
+except Exception:
+    clashed = True
+if not clashed:
+    fail("clash without get_or_create did not error")
+c.kill(sid5)
+
 c.close()
 b.close()
 print("OK python")

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Released version of this client, kept in step with the pupptyeer project
 # release (see PROTOCOL.md / git tags).
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 import base64
 import json
@@ -158,14 +158,34 @@ class PupptyeerClient:
         return off
 
     def new_session(self, command: str, args=None, cwd: str = "", env=None,
-                    cols: int = 80, rows: int = 24, raw: bool = False) -> str:
+                    cols: int = 80, rows: int = 24, raw: bool = False,
+                    requested_id: str = "", get_or_create: bool = False) -> str:
         # raw=True creates a session with no terminal emulator on the daemon
         # (lower CPU/latency); rendered capture (capture_screen) is then
         # unavailable, raw capture_pane still works.
+        # requested_id uses that string as the session id instead of a daemon
+        # UUID; with get_or_create, an alive session already holding it is
+        # returned as is (continuation) instead of erroring on the clash.
         r = self._call({"type": "new_session", "command": command,
                          "args": args or [], "cwd": cwd, "env": env,
-                         "cols": cols, "rows": rows, "raw": raw})
+                         "cols": cols, "rows": rows, "raw": raw,
+                         "requested_id": requested_id,
+                         "get_or_create": get_or_create})
         return r.get("session", "")
+
+    def ensure_session(self, session_id: str, command: str, args=None,
+                       cwd: str = "", env=None, cols: int = 80, rows: int = 24,
+                       raw: bool = False) -> bool:
+        """Continue if alive, else create: if an alive session already holds
+        session_id it is returned (False); otherwise a new session is spawned
+        with that id (True). command/args/cwd/env/cols/rows are used only when a
+        session is actually created."""
+        for s in self.list_sessions():
+            if s.get("id") == session_id and s.get("alive"):
+                return False
+        self.new_session(command, args, cwd, env, cols, rows, raw,
+                         requested_id=session_id, get_or_create=True)
+        return True
 
     def list_sessions(self) -> list:
         return self._call({"type": "list_sessions"}).get("sessions") or []

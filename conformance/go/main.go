@@ -203,5 +203,29 @@ func main() {
 		fail("kill(raw): %v", err)
 	}
 
+	// caller-supplied id: requested_id becomes the session id; a second create
+	// with get_or_create continues it; a clash without get_or_create errors.
+	wantID := "conf-" + marker
+	id5, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(wantID))
+	if err != nil {
+		fail("new_session(requested_id): %v", err)
+	}
+	if id5 != wantID {
+		fail("requested_id not honoured: got %q want %q", id5, wantID)
+	}
+	again, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(wantID), client.WithGetOrCreate())
+	if err != nil {
+		fail("new_session(get_or_create): %v", err)
+	}
+	if again != wantID {
+		fail("get_or_create did not continue: got %q want %q", again, wantID)
+	}
+	if _, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(wantID)); err == nil {
+		fail("clash without get_or_create did not error")
+	}
+	if err := c.Kill(id5); err != nil {
+		fail("kill(requested_id): %v", err)
+	}
+
 	fmt.Println("OK go")
 }
