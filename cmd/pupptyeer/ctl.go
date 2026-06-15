@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,7 +20,7 @@ import (
 
 func runCtl(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pupptyeer ctl <list|new|send|capture|attach|resize|kill|gc> [args...]")
+		return errors.New("usage: pupptyeer ctl <list|new|send|capture|attach|expect|resize|kill|gc> [args...]")
 	}
 	c, err := client.Dial(socketPath())
 	if err != nil {
@@ -154,6 +155,9 @@ func runCtl(args []string) error {
 			return err
 		}
 		return ctlAttachInteractive(c, rest[0], cfg)
+
+	case "expect":
+		return ctlExpect(c, args[1:])
 
 	case "resize":
 		if len(args) < 4 {
@@ -408,4 +412,203 @@ func ctlAttach(c *client.Client, session string) error {
 			}
 		}
 	}
+}
+
+// expectWindow bounds the match buffer so a long-running stream can't grow it
+// without limit. It is large enough that a sentinel split across output chunks
+// (or a regex spanning a chunk boundary) still matches; it mirrors the
+// scrollback ring size.
+const expectWindow = 256 * 1024
+
+// ansiRe strips ANSI escape sequences (CSI/SGR plus the common two-byte
+// escapes) so --strip-ansi can match plain text against an animated TUI. It is
+// applied per output chunk, so an escape split across two chunks may slip
+// through; a sentinel printed in a single write (the intended use) is
+// unaffected.
+var ansiRe = regexp.MustCompile(`\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])`)
+
+// ctlExpect attaches to a session and blocks until a trigger fires: a regex or
+// substring appears in the output, the output goes quiet for --idle, the child
+// exits (--exit), or --timeout elapses. It does not poll - it rides the daemon's
+// push-based attach stream. Each fire prints one line to stdout; the exit code
+// reports the outcome (0 fired, 2 timed out, 3 session closed first). With
+// --follow it keeps reporting matches until the session closes or --timeout.
+//
+// By default matching is armed only for live output (after scrollback replay),
+// so a stale marker in the ring does not cause a false fire; --include-scrollback
+// also scans the replay. It is built entirely on the existing Attach/Events
+// client surface, so it adds no wire verb and no parity surface.
+func ctlExpect(c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("expect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	const usage = "usage: pupptyeer ctl expect [--regex <re>] [--substr <s>] [--idle <dur>] [--exit] [--timeout <dur>] [--follow] [--strip-ansi] [--include-scrollback] <session>"
+	reFlag := fs.String("regex", "", "fire when this regexp matches the output")
+	substrFlag := fs.String("substr", "", "fire when this literal substring appears")
+	idleFlag := fs.Duration("idle", 0, "fire when output is quiet this long (e.g. 3s)")
+	exitFlag := fs.Bool("exit", false, "fire when the session's process exits")
+	timeoutFlag := fs.Duration("timeout", 0, "overall deadline (0 = no limit)")
+	followFlag := fs.Bool("follow", false, "keep matching; one line per hit until close/timeout")
+	stripFlag := fs.Bool("strip-ansi", false, "strip ANSI escapes before matching")
+	inclScroll := fs.Bool("include-scrollback", false, "also scan replayed scrollback (default: live only)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%s: %w", usage, err)
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return errors.New(usage)
+	}
+	session := rest[0]
+
+	var re *regexp.Regexp
+	if *reFlag != "" {
+		var err error
+		if re, err = regexp.Compile(*reFlag); err != nil {
+			return fmt.Errorf("invalid --regex: %w", err)
+		}
+	}
+	if re == nil && *substrFlag == "" && *idleFlag <= 0 && !*exitFlag {
+		return fmt.Errorf("arm at least one trigger (--regex/--substr/--idle/--exit)\n%s", usage)
+	}
+
+	if err := c.Attach(session, 0, 0); err != nil {
+		return err
+	}
+	defer func() { _ = c.Detach(session) }()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	armed := *inclScroll // until scrollback_end, only match if asked to
+	var buf []byte       // rolling match window (stripped text when --strip-ansi)
+	var base int         // bytes dropped off the front of buf, for absolute offsets
+
+	// Idle timer, reset on every output chunk; armed only once matching is live.
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	armIdle := func() {
+		if *idleFlag <= 0 || !armed {
+			return
+		}
+		if idleTimer == nil {
+			idleTimer = time.NewTimer(*idleFlag)
+			idleC = idleTimer.C
+			return
+		}
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(*idleFlag)
+	}
+	armIdle()
+
+	var deadlineC <-chan time.Time
+	if *timeoutFlag > 0 {
+		deadlineC = time.NewTimer(*timeoutFlag).C
+	}
+
+	// scan reports matches in buf, advancing past each; in one-shot mode it
+	// returns true after the first. It then trims buf back to expectWindow.
+	scan := func() bool {
+		if !armed {
+			return false
+		}
+		for {
+			idx, end, kind, pat := firstMatch(buf, re, *substrFlag)
+			if idx < 0 {
+				break
+			}
+			fmt.Printf("match %s=%q off=%d\n", kind, pat, base+idx)
+			if end <= idx { // zero-width match: force progress
+				end = idx + 1
+			}
+			base += end
+			buf = buf[end:]
+			if !*followFlag {
+				return true
+			}
+		}
+		if len(buf) > expectWindow {
+			drop := len(buf) - expectWindow
+			buf = buf[drop:]
+			base += drop
+		}
+		return false
+	}
+
+	for {
+		select {
+		case <-sig:
+			return &exitError{code: 130}
+		case <-deadlineC:
+			fmt.Println("timeout")
+			return &exitError{code: 2}
+		case <-idleC:
+			fmt.Printf("idle %s\n", *idleFlag)
+			if !*followFlag {
+				return nil
+			}
+			armIdle() // re-arm for the next quiet window
+		case m, ok := <-c.Events():
+			if !ok {
+				fmt.Println("closed")
+				return &exitError{code: 3}
+			}
+			if m.Session != session {
+				continue
+			}
+			switch m.Type {
+			case client.TypeScrollbackEnd:
+				armed = true
+				armIdle()
+				if scan() {
+					return nil
+				}
+			case client.TypeOutput:
+				b, _ := client.OutputBytes(m)
+				if *stripFlag {
+					b = ansiRe.ReplaceAll(b, nil)
+				}
+				if armed {
+					buf = append(buf, b...)
+				}
+				armIdle()
+				if scan() {
+					return nil
+				}
+			case client.TypeExit:
+				if *exitFlag {
+					if m.ExitCode != nil {
+						fmt.Printf("exit code=%d\n", *m.ExitCode)
+					} else {
+						fmt.Println("exit code=?")
+					}
+					return nil
+				}
+			case client.TypeSessionClosed:
+				fmt.Println("closed")
+				return &exitError{code: 3}
+			}
+		}
+	}
+}
+
+// firstMatch returns the earliest match of re or substr in buf as [start,end)
+// byte offsets, a kind label, and the matched pattern; start is -1 if neither
+// matches. When both match, the one starting earlier wins.
+func firstMatch(buf []byte, re *regexp.Regexp, substr string) (start, end int, kind, pat string) {
+	start = -1
+	if re != nil {
+		if loc := re.FindIndex(buf); loc != nil {
+			start, end, kind, pat = loc[0], loc[1], "regex", re.String()
+		}
+	}
+	if substr != "" {
+		if i := bytes.Index(buf, []byte(substr)); i >= 0 && (start < 0 || i < start) {
+			start, end, kind, pat = i, i+len(substr), "substr", substr
+		}
+	}
+	return
 }

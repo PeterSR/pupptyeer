@@ -11,6 +11,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -21,6 +22,22 @@ import (
 
 var version = "dev"
 
+// exitError lets a ctl subcommand request a specific process exit code while
+// still flowing through runCtl's error return. `ctl expect` uses it to map a
+// trigger outcome to a code (2 = timed out, 3 = session closed first, 130 =
+// interrupted) without printing a stderr error line; a nil err stays quiet.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return fmt.Sprintf("exit code %d", e.code)
+}
+
 const usage = `pupptyeer: local PTY session manager
 
 Usage:
@@ -28,7 +45,7 @@ Usage:
   pupptyeer daemon install         install + start as a per-user service (auto-start at login)
   pupptyeer daemon uninstall       stop + remove the service
   pupptyeer daemon start|stop|restart|status   manage the installed service
-  pupptyeer ctl <cmd> [args...]    drive the daemon (list|new|send|capture|attach|resize|kill)
+  pupptyeer ctl <cmd> [args...]    drive the daemon (list|new|send|capture|attach|expect|resize|kill)
   pupptyeer version
 
 The MCP server is a separate binary: pupptyeer-mcp (stdio or http).
@@ -54,6 +71,13 @@ func main() {
 		}
 	case "ctl":
 		if err := runCtl(args[1:]); err != nil {
+			var ee *exitError
+			if errors.As(err, &ee) {
+				if ee.err != nil {
+					fmt.Fprintf(os.Stderr, "pupptyeer ctl: %v\n", ee.err)
+				}
+				os.Exit(ee.code)
+			}
 			fmt.Fprintf(os.Stderr, "pupptyeer ctl: %v\n", err)
 			os.Exit(1)
 		}

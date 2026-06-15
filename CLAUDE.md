@@ -38,6 +38,7 @@ go build -o bin/pupptyeer ./cmd/pupptyeer     # daemon + CLI
 go build -C mcp -o ../bin/pupptyeer-mcp .      # pupptyeer-mcp (separate module)
 go vet ./... && go test ./...           # Go unit + end-to-end drive test (run go -C mcp vet ./... too)
 bash conformance/run.sh                 # cross-client conformance (Go + TS + Python)
+bash cmd/pupptyeer/expect_smoke.sh      # `ctl expect` triggers: regex/substr/idle/exit/timeout/follow
 
 # cross-platform compile (PTY layer is Unix + Windows)
 GOOS=windows GOARCH=amd64 go build ./cmd/pupptyeer

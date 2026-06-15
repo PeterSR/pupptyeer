@@ -19,7 +19,7 @@ import (
 
 // Version is the released version of this client, kept in step with the
 // pupptyeer project release (see PROTOCOL.md / git tags).
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 // Client is a connection to the daemon. Safe for concurrent use.
 type Client struct {

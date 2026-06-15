@@ -63,6 +63,10 @@ pupptyeer daemon uninstall                   # stop + remove
 ./bin/pupptyeer ctl capture --render --settle 200 <id>  # wait for the screen to go quiet (200ms), then render
 ./bin/pupptyeer ctl attach <id>              # interactive: stdin forwarded, resize propagated, Ctrl-\ detaches
 ./bin/pupptyeer ctl attach -r <id>           # read-only output stream (auto when stdin isn't a tty)
+./bin/pupptyeer ctl expect --regex 'DONE' --timeout 10m <id>   # block (no polling) until output matches, then exit 0
+./bin/pupptyeer ctl expect --idle 3s <id>    # ...or until output goes quiet for 3s
+./bin/pupptyeer ctl expect --exit <id>       # ...or until the child process exits (prints its code)
+./bin/pupptyeer ctl expect --regex 'ERROR' --follow --strip-ansi <id>   # one line per hit; wrap in a watcher
 ./bin/pupptyeer ctl kill <id>
 ./bin/pupptyeer ctl gc --max-idle 1h         # reap sessions idle (no PTY I/O) for >= 1h; --max-idle 0 reaps all
 
@@ -150,6 +154,33 @@ buffer - so clients never have to embed their own emulator to read a TUI. Either
 `settle_ms` to hold the reply until the PTY has been quiet for that long (the reliable way to read a
 screen after sending input). Rendering reports *what is on the screen*, never what it means; any
 interpretation belongs in the layer above.
+
+## Waiting on a session (`ctl expect`)
+
+`ctl expect` blocks until something happens on a session and then exits - no `capture` polling loop.
+It rides the daemon's push-based attach stream, so the daemon does the watching. Arm any combination
+of triggers; the first to fire wins:
+
+- `--regex <re>` / `--substr <s>` - the pattern appears in the output (matched across chunk
+  boundaries; add `--strip-ansi` to match plain text through a TUI's escape sequences),
+- `--idle <dur>` - output goes quiet for that long (quiescence),
+- `--exit` - the child process exits (its code is printed),
+- `--timeout <dur>` - an overall deadline.
+
+Each fire prints one line (`match regex="DONE" off=12`, `idle 3s`, `exit code=7`); the exit code is
+the machine-readable outcome: **0** a trigger fired, **2** timed out, **3** the session closed first.
+Matching is armed for live output only - a stale marker already in the scrollback won't trigger it
+(pass `--include-scrollback` to also scan the replay). `--follow` keeps reporting, one line per hit,
+until the session closes or `--timeout`.
+
+This is the poll-free way to let one process wait on another - e.g. an agent driving a second agent
+in a PTY. One-shot (default) exits the moment the trigger fires, so backgrounding the single call is
+itself the "wake when the inner process is done" signal - no polling loop; `--follow` is what you
+wrap in an event watcher to wake on each hit. For a
+program with an animated TUI (a spinner never goes quiet), trigger on a sentinel `--regex` the inner
+program prints; `--idle`/`--exit` suit line-oriented or headless inner processes. It is a CLI
+convenience built entirely on the `attach` verb, so it adds no wire surface. Smoke:
+`bash cmd/pupptyeer/expect_smoke.sh`.
 
 ## Fast path (opt-in)
 
