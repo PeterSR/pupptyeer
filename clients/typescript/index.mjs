@@ -137,7 +137,11 @@ export class PupptyeerClient {
       cols: r.cols || 0,
       rows: r.rows || 0,
       lines: r.lines || [],
-      cursor: r.cursor || { row: 0, col: 0, visible: true },
+      // An omitted cursor means the daemon didn't report one; default it to
+      // not-visible so callers treat an unknown cursor as untrustworthy rather
+      // than as a real cursor parked at row 0 (matches the Go client, whose
+      // nil/zero-value cursor is not visible).
+      cursor: r.cursor || { row: 0, col: 0, visible: false },
       altScreen: !!r.alt_screen,
     };
   }

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Released version of this client, kept in step with the pupptyeer project
 # release (see PROTOCOL.md / git tags).
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 import base64
 import json
@@ -27,7 +27,7 @@ class Cursor:
     """Cursor position in a rendered capture; 0-based, col may equal cols."""
     row: int = 0
     col: int = 0
-    visible: bool = True
+    visible: bool = False
 
 
 @dataclass
@@ -219,12 +219,16 @@ class PupptyeerClient:
                         "render": True, "settle_ms": settle_ms,
                         "timeout_ms": timeout_ms})
         c = r.get("cursor") or {}
+        # An omitted cursor means the daemon didn't report one; default it to
+        # not-visible so callers treat an unknown cursor as untrustworthy rather
+        # than as a real cursor parked at row 0 (matches the Go client, whose
+        # nil/zero-value cursor is not visible).
         return Screen(
             cols=r.get("cols", 0),
             rows=r.get("rows", 0),
             lines=r.get("lines") or [],
             cursor=Cursor(row=c.get("row", 0), col=c.get("col", 0),
-                          visible=c.get("visible", True)),
+                          visible=c.get("visible", False)),
             alt_screen=bool(r.get("alt_screen", False)),
         )
 
