@@ -69,6 +69,8 @@ pupptyeer daemon uninstall                   # stop + remove
 ./bin/pupptyeer ctl expect --regex 'ERROR' --follow --strip-ansi <id>   # one line per hit; wrap in a watcher
 ./bin/pupptyeer ctl kill <id>
 ./bin/pupptyeer ctl gc --max-idle 1h         # reap sessions idle (no PTY I/O) for >= 1h; --max-idle 0 reaps all
+./bin/pupptyeer ctl -n myapp new bash        # -n <ns> scopes a subcommand to a namespace (default "default")
+./bin/pupptyeer ctl list --all-namespaces    # list (or gc) across every namespace
 
 # MCP server (separate binary; talks to the daemon over the socket).
 # stdio by default:
@@ -146,6 +148,13 @@ straight from [GitHub Releases](https://github.com/PeterSR/pupptyeer/releases/la
 NDJSON over a unix socket: one JSON object per line, raw PTY bytes base64 in `data`. Verbs:
 `new_session`, `list_sessions`, `attach`/`detach`, `write_pane`, `capture_pane`, `resize`, `kill`,
 `gc` (reap sessions idle past a threshold). Full spec in [`PROTOCOL.md`](PROTOCOL.md).
+
+A session is addressed by `(namespace, id)`. Every session-addressed verb carries an optional
+`namespace` (omitted ⇒ `"default"`, so old clients are unaffected); ids are unique within a namespace
+but may repeat across them, giving per-app isolation inside one daemon. `list_sessions`/`gc` scope to
+a namespace or, with `all: true`, span every namespace. Clients set a connection-default namespace at
+`connect` (kubectl-context style) and can override it per call; in `ctl` use `-n <ns>` per subcommand
+and `--all-namespaces` on `list`/`gc`.
 
 `capture_pane` has two modes. By default it returns raw scrollback bytes. With `render`, the daemon
 maintains one live terminal emulator per session and returns the **rendered visible screen** - the

@@ -11,9 +11,21 @@ The actual implementation lives in the ``pupptyeer_client`` module shipped by th
 ``pupptyeer-client`` distribution. Prefer depending on ``pupptyeer-client``
 directly; this package exists so the bare ``pupptyeer`` name resolves too.
 """
-from pupptyeer_client import Cursor, PupptyeerClient, Screen
+from pupptyeer_client import (
+    DEFAULT_NAMESPACE,
+    Cursor,
+    PupptyeerClient,
+    Screen,
+    default_socket_path,
+)
 
 # Kept in step with the pupptyeer project release (see PROTOCOL.md / git tags).
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
-__all__ = ["PupptyeerClient", "Screen", "Cursor"]
+__all__ = [
+    "PupptyeerClient",
+    "Screen",
+    "Cursor",
+    "DEFAULT_NAMESPACE",
+    "default_socket_path",
+]

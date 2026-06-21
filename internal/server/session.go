@@ -31,8 +31,9 @@ type winsize struct{ cols, rows int }
 // a client attaching to an actively-producing session never sees live bytes
 // interleaved before its scrollback replay.
 type session struct {
-	id  string
-	srv *Server
+	id        string
+	namespace string
+	srv       *Server
 
 	command string
 	args    []string
@@ -61,6 +62,7 @@ func newSession(srv *Server, p protocol.Message) (*session, error) {
 
 	s := &session{
 		id:          id,
+		namespace:   nsOf(p.Namespace),
 		srv:         srv,
 		command:     p.Command,
 		args:        p.Args,
@@ -97,7 +99,7 @@ func (s *session) onOutput(chunk []byte) {
 	if len(s.attachments) > 0 {
 		data := protocol.EncodeData(chunk)
 		for c := range s.attachments {
-			c.send(protocol.Message{Type: protocol.TypeOutput, Session: s.id, Data: data})
+			c.send(protocol.Message{Type: protocol.TypeOutput, Namespace: s.namespace, Session: s.id, Data: data})
 		}
 	}
 	for rc := range s.rawSubs {
@@ -126,10 +128,10 @@ func (s *session) onExit(exitCode int) {
 	for _, c := range conns {
 		if !s.core.Killed() {
 			code := exitCode
-			c.send(protocol.Message{Type: protocol.TypeExit, Session: s.id, ExitCode: &code})
+			c.send(protocol.Message{Type: protocol.TypeExit, Namespace: s.namespace, Session: s.id, ExitCode: &code})
 		}
-		c.send(protocol.Message{Type: protocol.TypeSessionClosed, Session: s.id})
-		c.dropSession(s.id)
+		c.send(protocol.Message{Type: protocol.TypeSessionClosed, Namespace: s.namespace, Session: s.id})
+		c.dropSession(s.namespace, s.id)
 	}
 	// Raw firehose has no framing to carry an exit code: EOF is the signal.
 	for _, rc := range raws {
@@ -146,6 +148,7 @@ func (s *session) info() protocol.SessionInfo {
 	s.core.Locked(func(lc ptysession.LockedSession) { attached = len(s.attachments) })
 	return protocol.SessionInfo{
 		ID:           s.id,
+		Namespace:    s.namespace,
 		Command:      s.command,
 		Args:         s.args,
 		Cwd:          s.cwd,
@@ -164,7 +167,7 @@ func (s *session) info() protocol.SessionInfo {
 // lock so the replay is serialised against live output (see the session-type
 // doc comment).
 func (s *session) attach(c *conn, cols, rows int) {
-	c.addSession(s.id)
+	c.addSession(s.namespace, s.id)
 	s.core.Locked(func(lc ptysession.LockedSession) {
 		s.attachments[c] = winsize{cols, rows}
 		s.recomputeSizeLocked(lc)
@@ -174,9 +177,9 @@ func (s *session) attach(c *conn, cols, rows int) {
 			if end > len(snapshot) {
 				end = len(snapshot)
 			}
-			c.send(protocol.Message{Type: protocol.TypeOutput, Session: s.id, Data: protocol.EncodeData(snapshot[i:end])})
+			c.send(protocol.Message{Type: protocol.TypeOutput, Namespace: s.namespace, Session: s.id, Data: protocol.EncodeData(snapshot[i:end])})
 		}
-		c.send(protocol.Message{Type: protocol.TypeScrollbackEnd, Session: s.id})
+		c.send(protocol.Message{Type: protocol.TypeScrollbackEnd, Namespace: s.namespace, Session: s.id})
 	})
 }
 
@@ -185,7 +188,7 @@ func (s *session) detach(c *conn) {
 		delete(s.attachments, c)
 		s.recomputeSizeLocked(lc)
 	})
-	c.dropSession(s.id)
+	c.dropSession(s.namespace, s.id)
 }
 
 // attachRaw registers a raw firehose subscriber and replays the current

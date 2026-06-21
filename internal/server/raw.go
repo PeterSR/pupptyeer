@@ -122,8 +122,17 @@ func (s *Server) handleRawConn(nc net.Conn) {
 		_ = nc.Close()
 		return
 	}
+	// Handshake addresses a session by (namespace, id). The line is either a
+	// bare "<id>" (the default namespace - backward compatible with socat/nc
+	// users and pre-namespace clients) or "<namespace>\t<id>" to target
+	// another namespace. Tab is the delimiter so ids stay opaque.
+	ns := defaultNamespace
 	sid := strings.TrimSpace(line)
-	sess := s.getSession(sid)
+	if tab := strings.IndexByte(sid, '\t'); tab >= 0 {
+		ns = strings.TrimSpace(sid[:tab])
+		sid = strings.TrimSpace(sid[tab+1:])
+	}
+	sess := s.getSession(ns, sid)
 	if sess == nil {
 		_, _ = nc.Write([]byte("ERR session not found\n"))
 		_ = nc.Close()

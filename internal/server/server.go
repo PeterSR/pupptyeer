@@ -21,6 +21,27 @@ import (
 // than blocking PTY readers or other clients (backpressure decision).
 const outboundQueue = 256
 
+// defaultNamespace is the namespace a session lands in when a message
+// carries none. Session identity is (namespace, id): ids are unique within
+// a namespace but may repeat across namespaces. A client that never sends a
+// namespace operates entirely here, so the change is backward compatible.
+const defaultNamespace = "default"
+
+// nsOf normalises a (possibly empty) namespace from the wire to the value
+// the registry keys on.
+func nsOf(ns string) string {
+	if ns == "" {
+		return defaultNamespace
+	}
+	return ns
+}
+
+// sessKey is the registry key: a session is addressed by (namespace, id).
+type sessKey struct {
+	ns string
+	id string
+}
+
 // Server accepts connections and routes their multiplexed messages to a
 // shared session registry.
 type Server struct {
@@ -29,7 +50,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	conns    map[*conn]struct{}
-	sessions map[string]*session
+	sessions map[sessKey]*session
 }
 
 // New starts a Server listening on socketPath. The caller owns the
@@ -42,7 +63,7 @@ func New(socketPath string) (*Server, error) {
 	return &Server{
 		ln:       ln,
 		conns:    make(map[*conn]struct{}),
-		sessions: make(map[string]*session),
+		sessions: make(map[sessKey]*session),
 	}, nil
 }
 
@@ -102,10 +123,11 @@ func (s *Server) Close() error {
 func (s *Server) addSession(sess *session) *session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.sessions[sess.id]; ok && cur.core.Alive() {
+	key := sessKey{sess.namespace, sess.id}
+	if cur, ok := s.sessions[key]; ok && cur.core.Alive() {
 		return cur
 	}
-	s.sessions[sess.id] = sess
+	s.sessions[key] = sess
 	return sess
 }
 
@@ -116,23 +138,29 @@ func (s *Server) addSession(sess *session) *session {
 // onExit a no-op in that case.
 func (s *Server) removeSession(sess *session) {
 	s.mu.Lock()
-	if s.sessions[sess.id] == sess {
-		delete(s.sessions, sess.id)
+	key := sessKey{sess.namespace, sess.id}
+	if s.sessions[key] == sess {
+		delete(s.sessions, key)
 	}
 	s.mu.Unlock()
 }
 
-func (s *Server) getSession(id string) *session {
+func (s *Server) getSession(ns, id string) *session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sessions[id]
+	return s.sessions[sessKey{nsOf(ns), id}]
 }
 
-func (s *Server) listSessions() []protocol.SessionInfo {
+// listSessions returns metadata for sessions in namespace ns, or across every
+// namespace when all is true (the explicit cross-cutting view).
+func (s *Server) listSessions(ns string, all bool) []protocol.SessionInfo {
+	ns = nsOf(ns)
 	s.mu.Lock()
 	sessions := make([]*session, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		sessions = append(sessions, sess)
+	for key, sess := range s.sessions {
+		if all || key.ns == ns {
+			sessions = append(sessions, sess)
+		}
 	}
 	s.mu.Unlock()
 	out := make([]protocol.SessionInfo, 0, len(sessions))
@@ -144,16 +172,22 @@ func (s *Server) listSessions() []protocol.SessionInfo {
 
 // gc kills every session idle (no PTY input or output) for at least
 // maxIdleSeconds and returns metadata for the reaped ones, snapshotted
-// just before each kill. maxIdleSeconds <= 0 reaps every session.
-func (s *Server) gc(maxIdleSeconds int) []protocol.SessionInfo {
+// just before each kill. maxIdleSeconds <= 0 reaps every session. Scoping
+// matches list: namespace ns only, or every namespace when all is true, so
+// an app cannot reap another namespace's idle sessions.
+func (s *Server) gc(maxIdleSeconds int, ns string, all bool) []protocol.SessionInfo {
 	if maxIdleSeconds < 0 {
 		maxIdleSeconds = 0
 	}
+	ns = nsOf(ns)
 	cutoff := time.Now().Add(-time.Duration(maxIdleSeconds) * time.Second)
 
 	s.mu.Lock()
 	victims := make([]*session, 0)
-	for _, sess := range s.sessions {
+	for key, sess := range s.sessions {
+		if !all && key.ns != ns {
+			continue
+		}
 		// idle >= maxIdleSeconds ⇔ lastActive at or before the cutoff.
 		if !sess.lastActive().After(cutoff) {
 			victims = append(victims, sess)
@@ -182,7 +216,7 @@ type conn struct {
 	once sync.Once
 
 	mu       sync.Mutex
-	attached map[string]bool
+	attached map[sessKey]bool
 }
 
 func newConn(srv *Server, nc net.Conn) *conn {
@@ -191,19 +225,19 @@ func newConn(srv *Server, nc net.Conn) *conn {
 		nc:       nc,
 		out:      make(chan []byte, outboundQueue),
 		done:     make(chan struct{}),
-		attached: make(map[string]bool),
+		attached: make(map[sessKey]bool),
 	}
 }
 
-func (c *conn) addSession(id string) {
+func (c *conn) addSession(ns, id string) {
 	c.mu.Lock()
-	c.attached[id] = true
+	c.attached[sessKey{ns, id}] = true
 	c.mu.Unlock()
 }
 
-func (c *conn) dropSession(id string) {
+func (c *conn) dropSession(ns, id string) {
 	c.mu.Lock()
-	delete(c.attached, id)
+	delete(c.attached, sessKey{ns, id})
 	c.mu.Unlock()
 }
 
@@ -270,11 +304,11 @@ func (c *conn) dispatch(m protocol.Message) {
 	case protocol.TypeNewSession:
 		c.handleNewSession(m)
 	case protocol.TypeListSessions:
-		c.send(protocol.Message{Type: protocol.TypeSessions, ID: m.ID, Sessions: c.srv.listSessions()})
+		c.send(protocol.Message{Type: protocol.TypeSessions, ID: m.ID, Sessions: c.srv.listSessions(m.Namespace, m.All)})
 	case protocol.TypeAttach:
 		c.handleAttach(m)
 	case protocol.TypeDetach:
-		if s := c.srv.getSession(m.Session); s != nil {
+		if s := c.srv.getSession(m.Namespace, m.Session); s != nil {
 			s.detach(c)
 		}
 	case protocol.TypeWritePane:
@@ -282,34 +316,36 @@ func (c *conn) dispatch(m protocol.Message) {
 	case protocol.TypeCapturePane:
 		c.handleCapture(m)
 	case protocol.TypeResize:
-		if s := c.srv.getSession(m.Session); s != nil {
+		if s := c.srv.getSession(m.Namespace, m.Session); s != nil {
 			s.resizeFrom(c, m.Cols, m.Rows)
 		}
 	case protocol.TypeKill:
 		c.handleKill(m)
 	case protocol.TypeGC:
-		c.send(protocol.Message{Type: protocol.TypeReaped, ID: m.ID, Sessions: c.srv.gc(m.MaxIdleSeconds)})
+		c.send(protocol.Message{Type: protocol.TypeReaped, ID: m.ID, Sessions: c.srv.gc(m.MaxIdleSeconds, m.Namespace, m.All)})
 	default:
-		c.sendError(m.ID, m.Session, "unknown type: "+m.Type)
+		c.sendError(m.ID, m.Namespace, m.Session, "unknown type: "+m.Type)
 	}
 }
 
 func (c *conn) handleNewSession(m protocol.Message) {
+	ns := nsOf(m.Namespace)
 	// Caller-supplied id: with GetOrCreate, an alive session already holding
 	// the id is returned as-is (continuation); without it, a live clash errors.
+	// The clash check is per-namespace: the same id may live in two namespaces.
 	if m.RequestedID != "" {
-		if existing := c.srv.getSession(m.RequestedID); existing != nil && existing.core.Alive() {
+		if existing := c.srv.getSession(ns, m.RequestedID); existing != nil && existing.core.Alive() {
 			if !m.GetOrCreate {
-				c.sendError(m.ID, m.RequestedID, "session id already exists")
+				c.sendError(m.ID, ns, m.RequestedID, "session id already exists")
 				return
 			}
-			c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Session: existing.id})
+			c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Namespace: ns, Session: existing.id})
 			return
 		}
 	}
 	s, err := newSession(c.srv, m)
 	if err != nil {
-		c.sendError(m.ID, "", err.Error())
+		c.sendError(m.ID, ns, "", err.Error())
 		return
 	}
 	if winner := c.srv.addSession(s); winner != s {
@@ -318,35 +354,35 @@ func (c *conn) handleNewSession(m protocol.Message) {
 		// live PTY, then honour the same get_or_create semantics as the top.
 		s.kill()
 		if !m.GetOrCreate {
-			c.sendError(m.ID, m.RequestedID, "session id already exists")
+			c.sendError(m.ID, ns, m.RequestedID, "session id already exists")
 			return
 		}
 		s = winner
 	}
-	c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Session: s.id})
+	c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Namespace: s.namespace, Session: s.id})
 }
 
 func (c *conn) handleAttach(m protocol.Message) {
-	s := c.srv.getSession(m.Session)
+	s := c.srv.getSession(m.Namespace, m.Session)
 	if s == nil {
-		c.sendError(m.ID, m.Session, "session not found")
+		c.sendError(m.ID, m.Namespace, m.Session, "session not found")
 		return
 	}
-	c.send(protocol.Message{Type: protocol.TypeAttached, ID: m.ID, Session: s.id})
+	c.send(protocol.Message{Type: protocol.TypeAttached, ID: m.ID, Namespace: s.namespace, Session: s.id})
 	s.attach(c, m.Cols, m.Rows)
 }
 
 func (c *conn) handleWrite(m protocol.Message) {
-	s := c.srv.getSession(m.Session)
+	s := c.srv.getSession(m.Namespace, m.Session)
 	if s == nil {
-		c.sendError(m.ID, m.Session, "session not found")
+		c.sendError(m.ID, m.Namespace, m.Session, "session not found")
 		return
 	}
 	var b []byte
 	if m.Data != "" {
 		dec, err := protocol.DecodeData(m.Data)
 		if err != nil {
-			c.sendError(m.ID, m.Session, "bad base64 data: "+err.Error())
+			c.sendError(m.ID, s.namespace, m.Session, "bad base64 data: "+err.Error())
 			return
 		}
 		b = dec
@@ -354,14 +390,14 @@ func (c *conn) handleWrite(m protocol.Message) {
 		b = []byte(m.Text)
 	}
 	if err := s.write(b); err != nil {
-		c.sendError(m.ID, m.Session, "write failed: "+err.Error())
+		c.sendError(m.ID, s.namespace, m.Session, "write failed: "+err.Error())
 	}
 }
 
 func (c *conn) handleCapture(m protocol.Message) {
-	s := c.srv.getSession(m.Session)
+	s := c.srv.getSession(m.Namespace, m.Session)
 	if s == nil {
-		c.sendError(m.ID, m.Session, "session not found")
+		c.sendError(m.ID, m.Namespace, m.Session, "session not found")
 		return
 	}
 	// Optionally wait for the screen to go quiet before snapshotting, then
@@ -371,41 +407,41 @@ func (c *conn) handleCapture(m protocol.Message) {
 	timeout := time.Duration(m.TimeoutMs) * time.Millisecond
 	if m.Render {
 		if s.core.Raw() {
-			c.sendError(m.ID, m.Session, "rendered capture is unavailable on a raw session (created with raw:true); use capture without render for raw scrollback")
+			c.sendError(m.ID, s.namespace, m.Session, "rendered capture is unavailable on a raw session (created with raw:true); use capture without render for raw scrollback")
 			return
 		}
 		scr, err := s.core.CaptureScreen(settle, timeout)
 		if err != nil {
-			c.sendError(m.ID, m.Session, err.Error())
+			c.sendError(m.ID, s.namespace, m.Session, err.Error())
 			return
 		}
 		cur := protocol.Cursor{Row: scr.Cursor.Row, Col: scr.Cursor.Col, Visible: scr.Cursor.Visible}
 		c.send(protocol.Message{
-			Type: protocol.TypeCapture, ID: m.ID, Session: s.id,
+			Type: protocol.TypeCapture, ID: m.ID, Namespace: s.namespace, Session: s.id,
 			Cols: scr.Cols, Rows: scr.Rows, Lines: scr.Lines, Cursor: &cur, AltScreen: scr.AltScreen,
 		})
 		return
 	}
 	data, err := s.core.CaptureRaw(settle, timeout)
 	if err != nil {
-		c.sendError(m.ID, m.Session, err.Error())
+		c.sendError(m.ID, s.namespace, m.Session, err.Error())
 		return
 	}
-	c.send(protocol.Message{Type: protocol.TypeCapture, ID: m.ID, Session: s.id, Data: protocol.EncodeData(data)})
+	c.send(protocol.Message{Type: protocol.TypeCapture, ID: m.ID, Namespace: s.namespace, Session: s.id, Data: protocol.EncodeData(data)})
 }
 
 func (c *conn) handleKill(m protocol.Message) {
-	s := c.srv.getSession(m.Session)
+	s := c.srv.getSession(m.Namespace, m.Session)
 	if s == nil {
-		c.sendError(m.ID, m.Session, "session not found")
+		c.sendError(m.ID, m.Namespace, m.Session, "session not found")
 		return
 	}
 	s.kill()
-	c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Session: m.Session})
+	c.send(protocol.Message{Type: protocol.TypeOK, ID: m.ID, Namespace: s.namespace, Session: m.Session})
 }
 
-func (c *conn) sendError(id int, session, msg string) {
-	c.send(protocol.Message{Type: protocol.TypeError, ID: id, Session: session, Message: msg})
+func (c *conn) sendError(id int, namespace, session, msg string) {
+	c.send(protocol.Message{Type: protocol.TypeError, ID: id, Namespace: namespace, Session: session, Message: msg})
 }
 
 // shutdown closes the connection and detaches it from every session it
@@ -415,13 +451,13 @@ func (c *conn) shutdown() {
 		close(c.done)
 		_ = c.nc.Close()
 		c.mu.Lock()
-		ids := make([]string, 0, len(c.attached))
-		for id := range c.attached {
-			ids = append(ids, id)
+		keys := make([]sessKey, 0, len(c.attached))
+		for key := range c.attached {
+			keys = append(keys, key)
 		}
 		c.mu.Unlock()
-		for _, id := range ids {
-			if s := c.srv.getSession(id); s != nil {
+		for _, key := range keys {
+			if s := c.srv.getSession(key.ns, key.id); s != nil {
 				s.detach(c)
 			}
 		}

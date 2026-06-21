@@ -91,6 +91,39 @@ catch { clashed = true; }
 if (!clashed) fail("clash without get_or_create did not error");
 await c.kill(id5);
 
+// namespaces: identity is (namespace, id). The same id in two namespaces is not
+// a collision; ops in one namespace cannot see or touch another's.
+const nsA = "nsA-" + marker;
+const nsB = "nsB-" + marker;
+const dup = "dup-" + marker;
+const gotA = await c.newSession({ command: "cat", cols: 80, rows: 24, requestedId: dup, namespace: nsA });
+if (gotA !== dup) fail(`nsA id = ${gotA} want ${dup}`);
+const gotB = await c.newSession({ command: "cat", cols: 80, rows: 24, requestedId: dup, namespace: nsB });
+if (gotB !== dup) fail(`nsB id = ${gotB} want ${dup} (same id different namespace must not collide)`);
+for (const ns of [nsA, nsB]) {
+  const ss = await c.listSessions({ namespace: ns });
+  if (!ss.find((s) => s.id === dup)) fail(`namespace ${ns} list missing ${dup}`);
+  if (ss.some((s) => s.namespace !== ns)) fail(`list_sessions(${ns}) returned a foreign namespace`);
+}
+await c.kill(dup, { namespace: nsA });
+deadline = Date.now() + 2000;
+gone = false;
+while (Date.now() < deadline) {
+  const ss = await c.listSessions({ namespace: nsA });
+  if (!ss.find((s) => s.id === dup)) { gone = true; break; }
+  await sleep(40);
+}
+if (!gone) fail("dup still in nsA after kill");
+if (!(await c.listSessions({ namespace: nsB })).find((s) => s.id === dup))
+  fail("killing dup in nsA also removed it from nsB (namespace isolation broken)");
+const defId = "def-" + marker;
+await c.newSession({ command: "cat", cols: 80, rows: 24, requestedId: defId });
+if (!(await c.listSessions()).find((s) => s.id === defId)) fail("default session not in default list");
+if ((await c.listSessions({ namespace: nsB })).find((s) => s.id === defId))
+  fail("default session leaked into nsB list");
+await c.kill(dup, { namespace: nsB });
+await c.kill(defId);
+
 c.close();
 b.close();
 console.log("OK ts");

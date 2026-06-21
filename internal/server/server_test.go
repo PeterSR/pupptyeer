@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -382,6 +383,130 @@ func TestCaptureSurvivesTerminalQuery(t *testing.T) {
 		_, e := c.CaptureScreen(id, client.WithSettle(200))
 		return e
 	})
+}
+
+// TestNamespaceIsolation covers (namespace, id) identity: the same id may live
+// in two namespaces without colliding, scoped list/gc see only their namespace,
+// and an op in one namespace cannot touch another's session.
+func TestNamespaceIsolation(t *testing.T) {
+	sock := startServer(t)
+	c, err := client.Dial(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	const id = "shared"
+	gotA, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(id), client.InNamespace("A"))
+	if err != nil {
+		t.Fatalf("new in A: %v", err)
+	}
+	gotB, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(id), client.InNamespace("B"))
+	if err != nil {
+		t.Fatalf("new in B (same id, different namespace must not collide): %v", err)
+	}
+	if gotA != id || gotB != id {
+		t.Fatalf("ids = %q,%q want %q", gotA, gotB, id)
+	}
+
+	has := func(ss []client.SessionInfo, id string) bool {
+		for _, s := range ss {
+			if s.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Scoped list: each namespace sees only its own session, tagged with it.
+	la, _ := c.ListSessions("A")
+	if len(la) != 1 || la[0].ID != id || la[0].Namespace != "A" {
+		t.Fatalf("list(A) = %+v, want one session %q in namespace A", la, id)
+	}
+	lb, _ := c.ListSessions("B")
+	if len(lb) != 1 || lb[0].Namespace != "B" {
+		t.Fatalf("list(B) = %+v, want one session in namespace B", lb)
+	}
+	// All-namespaces view sees both.
+	all, _ := c.ListAllSessions()
+	if !has(all, id) || len(all) < 2 {
+		t.Fatalf("ListAllSessions = %+v, want both namespaces", all)
+	}
+
+	// Isolation: killing the id in A must leave B's untouched.
+	if err := c.Kill(id, "A"); err != nil {
+		t.Fatalf("kill in A: %v", err)
+	}
+	waitFor(t, "id gone from A", func() bool {
+		ss, _ := c.ListSessions("A")
+		return !has(ss, id)
+	})
+	if ss, _ := c.ListSessions("B"); !has(ss, id) {
+		t.Fatal("killing the id in A also removed it from B (isolation broken)")
+	}
+
+	// gc scoped to A reaps nothing now; gc in B reaps B's session only.
+	reaped, _ := c.GC(0, "A")
+	if len(reaped) != 0 {
+		t.Fatalf("gc(A) reaped %+v, want none", reaped)
+	}
+	reaped, _ = c.GC(0, "B")
+	if !has(reaped, id) {
+		t.Fatalf("gc(B) did not reap %q: %+v", id, reaped)
+	}
+}
+
+// TestEmptyNamespaceLandsInDefault is the backward-compatibility guard: a
+// message that carries no namespace at all (an old, pre-namespace client) must
+// land in the "default" namespace, where the modern client's default-scoped
+// list finds it.
+func TestEmptyNamespaceLandsInDefault(t *testing.T) {
+	sock := startServer(t)
+
+	// Speak the raw protocol with no namespace field set, like an old client.
+	nc, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial raw: %v", err)
+	}
+	defer nc.Close()
+	enc := protocol.NewEncoder(nc)
+	dec := protocol.NewDecoder(nc)
+	if err := enc.Encode(protocol.Message{Type: protocol.TypeNewSession, ID: 1, Command: "cat", Cols: 80, Rows: 24, RequestedID: "legacy"}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	reply, err := dec.Decode()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if reply.Type != protocol.TypeOK || reply.Session != "legacy" {
+		t.Fatalf("reply = %+v, want ok for legacy", reply)
+	}
+	if reply.Namespace != "default" {
+		t.Fatalf("reply namespace = %q, want default", reply.Namespace)
+	}
+
+	// A modern client (default namespace) must see it, tagged "default".
+	c, err := client.Dial(sock)
+	if err != nil {
+		t.Fatalf("dial client: %v", err)
+	}
+	defer c.Close()
+	ss, err := c.ListSessions()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var found *client.SessionInfo
+	for i := range ss {
+		if ss[i].ID == "legacy" {
+			found = &ss[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("legacy session not in default list: %+v", ss)
+	}
+	if found.Namespace != "default" {
+		t.Fatalf("legacy session namespace = %q, want default", found.Namespace)
+	}
 }
 
 func TestProtocolRoundTrip(t *testing.T) {

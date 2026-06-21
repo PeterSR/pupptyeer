@@ -227,5 +227,78 @@ func main() {
 		fail("kill(requested_id): %v", err)
 	}
 
+	// namespaces: identity is (namespace, id). The same id in two namespaces is
+	// not a collision; ops in one namespace cannot see or touch another's.
+	nsA := "nsA-" + marker
+	nsB := "nsB-" + marker
+	dup := "dup-" + marker
+	gotA, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(dup), client.InNamespace(nsA))
+	if err != nil {
+		fail("new_session(nsA): %v", err)
+	}
+	if gotA != dup {
+		fail("nsA id = %q want %q", gotA, dup)
+	}
+	gotB, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(dup), client.InNamespace(nsB))
+	if err != nil {
+		fail("new_session(nsB) (same id different namespace must not collide): %v", err)
+	}
+	if gotB != dup {
+		fail("nsB id = %q want %q", gotB, dup)
+	}
+	// scoped list: each namespace sees its own session and reports the namespace.
+	assertScoped := func(ns string) {
+		ss, err := c.ListSessions(ns)
+		if err != nil {
+			fail("list_sessions(%s): %v", ns, err)
+		}
+		if !containsID(ss, dup) {
+			fail("namespace %s list missing %s", ns, dup)
+		}
+		for _, s := range ss {
+			if s.Namespace != ns {
+				fail("list_sessions(%s) returned a session in namespace %q", ns, s.Namespace)
+			}
+		}
+	}
+	assertScoped(nsA)
+	assertScoped(nsB)
+	// isolation: killing dup in nsA leaves nsB's dup alive.
+	if err := c.Kill(dup, nsA); err != nil {
+		fail("kill(nsA): %v", err)
+	}
+	gone = false
+	for i := 0; i < 100; i++ {
+		ss, _ := c.ListSessions(nsA)
+		if !containsID(ss, dup) {
+			gone = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !gone {
+		fail("dup still in nsA after kill")
+	}
+	if ss, _ := c.ListSessions(nsB); !containsID(ss, dup) {
+		fail("killing dup in nsA also removed it from nsB (namespace isolation broken)")
+	}
+	// omitted namespace lands in default.
+	defID := "def-" + marker
+	if _, err := c.NewSession("cat", nil, "", nil, 80, 24, client.WithSessionID(defID)); err != nil {
+		fail("new_session(default): %v", err)
+	}
+	if ss, _ := c.ListSessions(); !containsID(ss, defID) {
+		fail("default session not in default list")
+	}
+	if ss, _ := c.ListSessions(nsB); containsID(ss, defID) {
+		fail("default session leaked into nsB list")
+	}
+	if err := c.Kill(dup, nsB); err != nil {
+		fail("kill(nsB): %v", err)
+	}
+	if err := c.Kill(defID); err != nil {
+		fail("kill(default): %v", err)
+	}
+
 	fmt.Println("OK go")
 }

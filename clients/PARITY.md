@@ -7,12 +7,16 @@ clients** in the same change.
 
 | Capability | Daemon verb | Go (`clients/go`) | TypeScript (`clients/typescript`) | Python (`clients/python`) |
 |---|---|---|---|---|
-| connect | - | `client.Dial(sock)` | `PupptyeerClient.connect(sock)` | `PupptyeerClient.connect(sock)` |
-| spawn session | `new_session` | `NewSession(cmd,args,cwd,env,cols,rows[,opts])` | `newSession({command,args,cwd,env,cols,rows,raw?})` | `new_session(command,args,cwd,env,cols,rows,raw?)` |
+| connect (or scream) | - | `client.Connect(WithSocket?,WithNamespace?)` (or `Dial(sock)`) | `PupptyeerClient.connect(sock \| {socket?,namespace?})` | `PupptyeerClient.connect(socket?,namespace?)` |
+| default socket resolve | - | `DefaultSocketPath()` | `defaultSocketPath()` | `default_socket_path()` |
+| connection default namespace | - | `WithNamespace(ns)` at Connect / `Namespace()` | `connect({namespace})` / `.namespace` | `connect(namespace=…)` / `.namespace` |
+| per-call namespace override | `<verb>{namespace}` | trailing `ns ...string` / `InNamespace` / `WithCaptureNamespace` | `{namespace}` in each call's opts | `namespace=…` kwarg on each call |
+| spawn session | `new_session` | `NewSession(cmd,args,cwd,env,cols,rows[,opts])` | `newSession({command,args,cwd,env,cols,rows,raw?,namespace?})` | `new_session(command,args,cwd,env,cols,rows,raw?,namespace?)` |
 | raw session (no emulator) | `new_session{raw}` | `WithRaw()` option | `newSession({…,raw:true})` | `new_session(…,raw=True)` |
 | caller-supplied id | `new_session{requested_id,get_or_create}` | `WithSessionID(id)` / `WithGetOrCreate()` options | `newSession({…,requestedId,getOrCreate})` | `new_session(…,requested_id=…,get_or_create=…)` |
 | ensure (continue or create) | `new_session{requested_id,get_or_create}` | `EnsureSession(id,cmd,…)` | `ensureSession({id,command,…})` | `ensure_session(session_id,command,…)` |
-| list sessions | `list_sessions` | `ListSessions()` | `listSessions()` | `list_sessions()` |
+| list sessions (scoped) | `list_sessions{namespace}` | `ListSessions([ns])` | `listSessions({namespace?})` | `list_sessions(namespace?)` |
+| list sessions (all namespaces) | `list_sessions{all}` | `ListAllSessions()` | `listSessions({all:true})` | `list_sessions(all=True)` |
 | attach (stream) | `attach` | `Attach(id,cols,rows)` | `attach(id,{cols,rows})` | `attach(id,cols,rows)` |
 | detach | `detach` | `Detach(id)` | `detach(id)` | `detach(id)` |
 | write (raw bytes) | `write_pane` | `WritePane(id,[]byte)` | `writeBytes(id,buf)` | `write_pane(id,bytes)` |
@@ -21,7 +25,8 @@ clients** in the same change.
 | render screen | `capture_pane{render}` | `CaptureScreen(id[,WithSettle…])` | `captureScreen(id,{settleMs?})` | `capture_screen(id,settle_ms?)` |
 | resize | `resize` | `Resize(id,cols,rows)` | `resize(id,cols,rows)` | `resize(id,cols,rows)` |
 | kill | `kill` | `Kill(id)` | `kill(id)` | `kill(id)` |
-| gc (reap idle) | `gc` | `GC(maxIdleSeconds)` | `gc(maxIdleSeconds)` | `gc(max_idle_seconds)` |
+| gc (reap idle, scoped) | `gc{namespace}` | `GC(maxIdleSeconds[,ns])` | `gc(maxIdleSeconds,{namespace?})` | `gc(max_idle_seconds,namespace?)` |
+| gc (reap idle, all namespaces) | `gc{all}` | `GCAll(maxIdleSeconds)` | `gc(maxIdleSeconds,{all:true})` | `gc(max_idle_seconds,all=True)` |
 | live output cb | `output` | `Events()` channel | `onOutput(id,fn)` | `on_output(id,fn)` |
 | all events cb | * | `Events()` channel | `onEvent(fn)` | `on_event(fn)` |
 | close | - | `Close()` | `close()` | `close()` |

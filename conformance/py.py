@@ -123,6 +123,45 @@ if not clashed:
     fail("clash without get_or_create did not error")
 c.kill(sid5)
 
+# namespaces: identity is (namespace, id). The same id in two namespaces is not
+# a collision; ops in one namespace cannot see or touch another's.
+m = marker.decode()
+ns_a = "nsA-" + m
+ns_b = "nsB-" + m
+dup = "dup-" + m
+got_a = c.new_session(command="cat", cols=80, rows=24, requested_id=dup, namespace=ns_a)
+if got_a != dup:
+    fail("nsA id = %r want %r" % (got_a, dup))
+got_b = c.new_session(command="cat", cols=80, rows=24, requested_id=dup, namespace=ns_b)
+if got_b != dup:
+    fail("nsB id = %r want %r (same id different namespace must not collide)" % (got_b, dup))
+for ns in (ns_a, ns_b):
+    ss = c.list_sessions(namespace=ns)
+    if not any(s["id"] == dup for s in ss):
+        fail("namespace %s list missing %s" % (ns, dup))
+    if any(s.get("namespace") != ns for s in ss):
+        fail("list_sessions(%s) returned a foreign namespace" % ns)
+c.kill(dup, namespace=ns_a)
+deadline = time.time() + 2.0
+gone = False
+while time.time() < deadline:
+    if not any(s["id"] == dup for s in c.list_sessions(namespace=ns_a)):
+        gone = True
+        break
+    time.sleep(0.04)
+if not gone:
+    fail("dup still in nsA after kill")
+if not any(s["id"] == dup for s in c.list_sessions(namespace=ns_b)):
+    fail("killing dup in nsA also removed it from nsB (namespace isolation broken)")
+def_id = "def-" + m
+c.new_session(command="cat", cols=80, rows=24, requested_id=def_id)
+if not any(s["id"] == def_id for s in c.list_sessions()):
+    fail("default session not in default list")
+if any(s["id"] == def_id for s in c.list_sessions(namespace=ns_b)):
+    fail("default session leaked into nsB list")
+c.kill(dup, namespace=ns_b)
+c.kill(def_id)
+
 c.close()
 b.close()
 print("OK python")

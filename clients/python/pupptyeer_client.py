@@ -2,7 +2,7 @@
 socket). Standard library only.
 
     from pupptyeer_client import PupptyeerClient
-    c = PupptyeerClient.connect(os.environ["PUPPTYEER_SOCK"])
+    c = PupptyeerClient.connect(namespace="my-app")
     sid = c.new_session(command="bash")
     c.on_output(sid, lambda b: sys.stdout.buffer.write(b))
     c.attach(sid, cols=80, rows=24)
@@ -12,14 +12,36 @@ from __future__ import annotations
 
 # Released version of this client, kept in step with the pupptyeer project
 # release (see PROTOCOL.md / git tags).
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 import base64
 import json
+import os
 import socket
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
+
+# The namespace a connection uses when none is given. Session identity is
+# (namespace, id): ids are unique within a namespace but may repeat across
+# namespaces. A client that never sets a namespace operates entirely here,
+# matching pre-namespace behaviour.
+DEFAULT_NAMESPACE = "default"
+
+
+def default_socket_path() -> str:
+    """Resolve the daemon socket the way the CLI and the other clients do:
+    $PUPPTYEER_SOCK, else $XDG_RUNTIME_DIR/pupptyeer/daemon.sock, else
+    $TMPDIR/pupptyeer-<uid>/daemon.sock (<uid> is the numeric uid on POSIX)."""
+    sock = os.environ.get("PUPPTYEER_SOCK")
+    if sock:
+        return sock
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        return os.path.join(xdg, "pupptyeer", "daemon.sock")
+    uid = str(os.getuid()) if hasattr(os, "getuid") else "shared"
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "pupptyeer-" + uid, "daemon.sock")
 
 
 @dataclass
@@ -42,22 +64,42 @@ class Screen:
 
 
 class PupptyeerClient:
-    def __init__(self, sock: socket.socket):
+    def __init__(self, sock: socket.socket, namespace: str = DEFAULT_NAMESPACE):
         self._sock = sock
+        self.namespace = namespace or DEFAULT_NAMESPACE
         self._lock = threading.Lock()
         self._next_id = 0
         self._pending: dict[int, list] = {}  # id -> [Event, result]
-        self._output_handlers: dict[str, list[Callable[[bytes], None]]] = {}
+        # output handlers keyed by (namespace, session)
+        self._output_handlers: dict[tuple, list[Callable[[bytes], None]]] = {}
         self._event_handlers: list[Callable[[dict], None]] = []
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
     @classmethod
-    def connect(cls, path: str) -> "PupptyeerClient":
+    def connect(cls, socket_path: Optional[str] = None,
+                namespace: Optional[str] = None) -> "PupptyeerClient":
+        """Connect to the daemon. With no socket_path it resolves the default
+        location (default_socket_path); on an unreachable daemon it raises ONE
+        canonical, actionable error. It never spawns a daemon. namespace sets
+        the connection's default namespace (per-call args override it)."""
+        sock_path = socket_path or default_socket_path()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(path)
-        return cls(s)
+        try:
+            s.connect(sock_path)
+        except OSError as e:
+            s.close()
+            raise ConnectionError(
+                "no pupptyeer daemon at %s; install/start it "
+                "(`pupptyeer daemon install`) or set PUPPTYEER_SOCK: %s"
+                % (sock_path, e)
+            ) from e
+        return cls(s, namespace or DEFAULT_NAMESPACE)
+
+    def _ns(self, namespace: Optional[str]) -> str:
+        """Resolve a per-call namespace override against the connection default."""
+        return namespace or self.namespace
 
     def _read_loop(self) -> None:
         buf = b""
@@ -96,7 +138,8 @@ class PupptyeerClient:
                 slot[0].set()
                 return
         if msg.get("type") == "output":
-            hs = self._output_handlers.get(msg.get("session", ""))
+            key = (self._ns(msg.get("namespace")), msg.get("session", ""))
+            hs = self._output_handlers.get(key)
             if hs:
                 data = base64.b64decode(msg.get("data", "") or "")
                 # Copy so a handler that unsubscribes mid-dispatch is safe.
@@ -124,15 +167,18 @@ class PupptyeerClient:
             raise RuntimeError(reply.get("message", "error"))
         return reply
 
-    def on_output(self, session: str, fn: Callable[[bytes], None]) -> Callable[[], None]:
+    def on_output(self, session: str, fn: Callable[[bytes], None],
+                  namespace: Optional[str] = None) -> Callable[[], None]:
         """Register fn for a session's live output. Multiple handlers per
         session are supported (they all fire). Returns a callable that
-        unsubscribes this handler."""
-        hs = self._output_handlers.setdefault(session, [])
+        unsubscribes this handler. Output is keyed by (namespace, session);
+        namespace defaults to the connection's."""
+        key = (self._ns(namespace), session)
+        hs = self._output_handlers.setdefault(key, [])
         hs.append(fn)
 
         def off() -> None:
-            cur = self._output_handlers.get(session)
+            cur = self._output_handlers.get(key)
             if cur is None:
                 return
             try:
@@ -140,7 +186,7 @@ class PupptyeerClient:
             except ValueError:
                 return
             if not cur:
-                self._output_handlers.pop(session, None)
+                self._output_handlers.pop(key, None)
 
         return off
 
@@ -159,14 +205,17 @@ class PupptyeerClient:
 
     def new_session(self, command: str, args=None, cwd: str = "", env=None,
                     cols: int = 80, rows: int = 24, raw: bool = False,
-                    requested_id: str = "", get_or_create: bool = False) -> str:
+                    requested_id: str = "", get_or_create: bool = False,
+                    namespace: Optional[str] = None) -> str:
         # raw=True creates a session with no terminal emulator on the daemon
         # (lower CPU/latency); rendered capture (capture_screen) is then
         # unavailable, raw capture_pane still works.
         # requested_id uses that string as the session id instead of a daemon
         # UUID; with get_or_create, an alive session already holding it is
         # returned as is (continuation) instead of erroring on the clash.
-        r = self._call({"type": "new_session", "command": command,
+        # namespace selects the session's namespace (default: the connection's).
+        r = self._call({"type": "new_session", "namespace": self._ns(namespace),
+                         "command": command,
                          "args": args or [], "cwd": cwd, "env": env,
                          "cols": cols, "rows": rows, "raw": raw,
                          "requested_id": requested_id,
@@ -175,47 +224,60 @@ class PupptyeerClient:
 
     def ensure_session(self, session_id: str, command: str, args=None,
                        cwd: str = "", env=None, cols: int = 80, rows: int = 24,
-                       raw: bool = False) -> bool:
+                       raw: bool = False, namespace: Optional[str] = None) -> bool:
         """Continue if alive, else create: if an alive session already holds
         session_id it is returned (False); otherwise a new session is spawned
         with that id (True). command/args/cwd/env/cols/rows are used only when a
         session is actually created."""
-        for s in self.list_sessions():
+        ns = self._ns(namespace)
+        for s in self.list_sessions(namespace=ns):
             if s.get("id") == session_id and s.get("alive"):
                 return False
         self.new_session(command, args, cwd, env, cols, rows, raw,
-                         requested_id=session_id, get_or_create=True)
+                         requested_id=session_id, get_or_create=True,
+                         namespace=ns)
         return True
 
-    def list_sessions(self) -> list:
-        return self._call({"type": "list_sessions"}).get("sessions") or []
+    def list_sessions(self, namespace: Optional[str] = None,
+                      all: bool = False) -> list:
+        """List sessions in namespace (default: the connection's), or across
+        every namespace with all=True."""
+        msg = ({"type": "list_sessions", "all": True} if all
+               else {"type": "list_sessions", "namespace": self._ns(namespace)})
+        return self._call(msg).get("sessions") or []
 
-    def attach(self, session: str, cols: int = 0, rows: int = 0) -> None:
-        self._call({"type": "attach", "session": session, "cols": cols, "rows": rows})
+    def attach(self, session: str, cols: int = 0, rows: int = 0,
+               namespace: Optional[str] = None) -> None:
+        self._call({"type": "attach", "namespace": self._ns(namespace),
+                    "session": session, "cols": cols, "rows": rows})
 
-    def detach(self, session: str) -> None:
-        self._send({"type": "detach", "session": session})
+    def detach(self, session: str, namespace: Optional[str] = None) -> None:
+        self._send({"type": "detach", "namespace": self._ns(namespace),
+                    "session": session})
 
-    def write_pane(self, session: str, text) -> None:
+    def write_pane(self, session: str, text, namespace: Optional[str] = None) -> None:
         data = text.encode() if isinstance(text, str) else bytes(text)
-        self._send({"type": "write_pane", "session": session,
+        self._send({"type": "write_pane", "namespace": self._ns(namespace),
+                    "session": session,
                     "data": base64.b64encode(data).decode()})
 
     def capture_pane(self, session: str, settle_ms: int = 0,
-                     timeout_ms: int = 0) -> bytes:
+                     timeout_ms: int = 0, namespace: Optional[str] = None) -> bytes:
         """Return the session's raw scrollback bytes. With settle_ms > 0,
         first waits for the screen to go quiet."""
-        r = self._call({"type": "capture_pane", "session": session,
+        r = self._call({"type": "capture_pane", "namespace": self._ns(namespace),
+                        "session": session,
                         "settle_ms": settle_ms, "timeout_ms": timeout_ms})
         return base64.b64decode(r.get("data", "") or "")
 
     def capture_screen(self, session: str, settle_ms: int = 0,
-                       timeout_ms: int = 0) -> Screen:
+                       timeout_ms: int = 0, namespace: Optional[str] = None) -> Screen:
         """Return the daemon's authoritative rendered screen (the visible
         grid, not scrollback). With settle_ms > 0, first waits for the
         screen to go quiet - the usual way to read a TUI after sending
         input."""
-        r = self._call({"type": "capture_pane", "session": session,
+        r = self._call({"type": "capture_pane", "namespace": self._ns(namespace),
+                        "session": session,
                         "render": True, "settle_ms": settle_ms,
                         "timeout_ms": timeout_ms})
         c = r.get("cursor") or {}
@@ -232,17 +294,25 @@ class PupptyeerClient:
             alt_screen=bool(r.get("alt_screen", False)),
         )
 
-    def resize(self, session: str, cols: int, rows: int) -> None:
-        self._send({"type": "resize", "session": session, "cols": cols, "rows": rows})
+    def resize(self, session: str, cols: int, rows: int,
+               namespace: Optional[str] = None) -> None:
+        self._send({"type": "resize", "namespace": self._ns(namespace),
+                    "session": session, "cols": cols, "rows": rows})
 
-    def kill(self, session: str) -> None:
-        self._call({"type": "kill", "session": session})
+    def kill(self, session: str, namespace: Optional[str] = None) -> None:
+        self._call({"type": "kill", "namespace": self._ns(namespace),
+                    "session": session})
 
-    def gc(self, max_idle_seconds: int) -> list:
-        """Reap sessions idle (no PTY input/output) for >= max_idle_seconds;
-        returns the reaped SessionInfo dicts. max_idle_seconds <= 0 reaps all."""
-        return self._call({"type": "gc",
-                            "max_idle_seconds": max_idle_seconds}).get("sessions") or []
+    def gc(self, max_idle_seconds: int, namespace: Optional[str] = None,
+           all: bool = False) -> list:
+        """Reap sessions idle (no PTY input/output) for >= max_idle_seconds in
+        namespace (default: the connection's) or across every namespace with
+        all=True; returns the reaped SessionInfo dicts. max_idle_seconds <= 0
+        reaps all (matching)."""
+        msg = ({"type": "gc", "max_idle_seconds": max_idle_seconds, "all": True}
+               if all else {"type": "gc", "max_idle_seconds": max_idle_seconds,
+                            "namespace": self._ns(namespace)})
+        return self._call(msg).get("sessions") or []
 
     def close(self) -> None:
         try:

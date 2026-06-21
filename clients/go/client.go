@@ -19,12 +19,19 @@ import (
 
 // Version is the released version of this client, kept in step with the
 // pupptyeer project release (see PROTOCOL.md / git tags).
-const Version = "0.8.0"
+const Version = "0.9.0"
+
+// DefaultNamespace is the namespace a connection uses when none is given.
+// Session identity is (namespace, id): ids are unique within a namespace but
+// may repeat across namespaces. A client that never sets a namespace operates
+// entirely here, matching pre-namespace behaviour.
+const DefaultNamespace = "default"
 
 // Client is a connection to the daemon. Safe for concurrent use.
 type Client struct {
 	nc         net.Conn
 	socketPath string // retained for AttachRaw, which dials the sibling raw socket
+	namespace  string // connection default namespace; per-call args override it
 
 	writeMu sync.Mutex
 	enc     *encoder
@@ -38,7 +45,10 @@ type Client struct {
 	once   sync.Once
 }
 
-// Dial connects to the daemon at socketPath.
+// Dial connects to the daemon at socketPath in the default namespace. It is
+// the low-level entry point: it returns the raw dial error verbatim and does
+// no socket resolution. Prefer Connect for the connect-or-scream behaviour
+// (default socket resolution + one actionable error + a chosen namespace).
 func Dial(socketPath string) (*Client, error) {
 	nc, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -47,6 +57,7 @@ func Dial(socketPath string) (*Client, error) {
 	c := &Client{
 		nc:         nc,
 		socketPath: socketPath,
+		namespace:  DefaultNamespace,
 		enc:        newEncoder(nc),
 		pending:    make(map[int]chan Message),
 		events:     make(chan Message, 1024),
@@ -54,6 +65,62 @@ func Dial(socketPath string) (*Client, error) {
 	}
 	go c.readLoop()
 	return c, nil
+}
+
+// ConnectOption configures Connect.
+type ConnectOption func(*connectConfig)
+
+type connectConfig struct {
+	socket    string
+	namespace string
+}
+
+// WithSocket sets an explicit daemon socket path. Without it, Connect resolves
+// the default location via DefaultSocketPath.
+func WithSocket(path string) ConnectOption {
+	return func(cc *connectConfig) { cc.socket = path }
+}
+
+// WithNamespace sets the connection's default namespace (kubectl-context
+// style): every session call inherits it unless overridden per call. Empty
+// means DefaultNamespace.
+func WithNamespace(ns string) ConnectOption {
+	return func(cc *connectConfig) { cc.namespace = ns }
+}
+
+// Connect is the single entry point apps should use: it resolves the default
+// socket (unless WithSocket is given), dials it, and on an unreachable daemon
+// returns ONE canonical, actionable error instead of a bare syscall string. It
+// never spawns a daemon - lifecycle is a supervisor/system-package concern.
+func Connect(opts ...ConnectOption) (*Client, error) {
+	cc := connectConfig{namespace: DefaultNamespace}
+	for _, o := range opts {
+		o(&cc)
+	}
+	sock := cc.socket
+	if sock == "" {
+		sock = DefaultSocketPath()
+	}
+	c, err := Dial(sock)
+	if err != nil {
+		return nil, fmt.Errorf("no pupptyeer daemon at %s; install/start it (`pupptyeer daemon install`) or set PUPPTYEER_SOCK: %w", sock, err)
+	}
+	if cc.namespace != "" {
+		c.namespace = cc.namespace
+	}
+	return c, nil
+}
+
+// Namespace returns the connection's default namespace.
+func (c *Client) Namespace() string { return c.namespace }
+
+// ns resolves a per-call namespace override against the connection default:
+// the first non-empty override wins, else the connection default.
+func (c *Client) ns(override ...string) string {
+	if len(override) > 0 && override[0] != "" {
+		return override[0]
+	}
+	return c.namespace
 }
 
 // Events returns the channel of unsolicited server messages (output,
@@ -168,10 +235,24 @@ func WithSessionID(id string) SessionOption { return func(m *Message) { m.Reques
 // It is the building block for continuation: same id, same live program.
 func WithGetOrCreate() SessionOption { return func(m *Message) { m.GetOrCreate = true } }
 
-// NewSession spawns command in a fresh PTY and returns its session id.
+// InNamespace overrides the connection's default namespace for this one
+// NewSession/EnsureSession call (a per-call override of the kubectl-context
+// connection default). An empty ns is a no-op (keeps the connection default),
+// matching the per-call override semantics of the other methods.
+func InNamespace(ns string) SessionOption {
+	return func(m *Message) {
+		if ns != "" {
+			m.Namespace = ns
+		}
+	}
+}
+
+// NewSession spawns command in a fresh PTY and returns its session id. The
+// session is created in the connection's default namespace unless InNamespace
+// overrides it.
 func (c *Client) NewSession(command string, args []string, cwd string, env map[string]string, cols, rows int, opts ...SessionOption) (string, error) {
 	m := Message{
-		Type: TypeNewSession, Command: command, Args: args,
+		Type: TypeNewSession, Namespace: c.namespace, Command: command, Args: args,
 		Cwd: cwd, Env: env, Cols: cols, Rows: rows,
 	}
 	for _, o := range opts {
@@ -190,7 +271,14 @@ func (c *Client) NewSession(command string, args []string, cwd string, env map[s
 // NewSession with WithSessionID + WithGetOrCreate. command/args/cwd/env/cols/rows
 // are used only when a session is actually created.
 func (c *Client) EnsureSession(id, command string, args []string, cwd string, env map[string]string, cols, rows int, opts ...SessionOption) (created bool, err error) {
-	infos, err := c.ListSessions()
+	// Resolve the target namespace the same way NewSession will (connection
+	// default unless an InNamespace option overrides it) so the existence check
+	// looks in the right namespace.
+	probe := Message{Namespace: c.namespace}
+	for _, o := range opts {
+		o(&probe)
+	}
+	infos, err := c.ListSessions(probe.Namespace)
 	if err != nil {
 		return false, err
 	}
@@ -207,9 +295,20 @@ func (c *Client) EnsureSession(id, command string, args []string, cwd string, en
 	return true, nil
 }
 
-// ListSessions returns metadata for all live sessions.
-func (c *Client) ListSessions() ([]SessionInfo, error) {
-	reply, err := c.call(Message{Type: TypeListSessions})
+// ListSessions returns metadata for live sessions in the given namespace
+// (the first argument, if any) or the connection's default namespace. Use
+// ListAllSessions for a cross-namespace view.
+func (c *Client) ListSessions(ns ...string) ([]SessionInfo, error) {
+	return c.listSessions(Message{Type: TypeListSessions, Namespace: c.ns(ns...)})
+}
+
+// ListAllSessions returns metadata for live sessions across every namespace.
+func (c *Client) ListAllSessions() ([]SessionInfo, error) {
+	return c.listSessions(Message{Type: TypeListSessions, All: true})
+}
+
+func (c *Client) listSessions(m Message) ([]SessionInfo, error) {
+	reply, err := c.call(m)
 	if err != nil {
 		return nil, err
 	}
@@ -222,20 +321,21 @@ func (c *Client) ListSessions() ([]SessionInfo, error) {
 }
 
 // Attach subscribes this connection to session's live output (delivered
-// on Events). cols/rows is this client's desired size (0 = don't vote).
-func (c *Client) Attach(session string, cols, rows int) error {
-	_, err := c.call(Message{Type: TypeAttach, Session: session, Cols: cols, Rows: rows})
+// on Events). cols/rows is this client's desired size (0 = don't vote). An
+// optional trailing namespace overrides the connection default.
+func (c *Client) Attach(session string, cols, rows int, ns ...string) error {
+	_, err := c.call(Message{Type: TypeAttach, Namespace: c.ns(ns...), Session: session, Cols: cols, Rows: rows})
 	return err
 }
 
 // Detach stops this connection's subscription to session.
-func (c *Client) Detach(session string) error {
-	return c.send(Message{Type: TypeDetach, Session: session})
+func (c *Client) Detach(session string, ns ...string) error {
+	return c.send(Message{Type: TypeDetach, Namespace: c.ns(ns...), Session: session})
 }
 
 // WritePane sends raw bytes to the session's PTY input.
-func (c *Client) WritePane(session string, data []byte) error {
-	return c.send(Message{Type: TypeWritePane, Session: session, Data: EncodeData(data)})
+func (c *Client) WritePane(session string, data []byte, ns ...string) error {
+	return c.send(Message{Type: TypeWritePane, Namespace: c.ns(ns...), Session: session, Data: EncodeData(data)})
 }
 
 // AttachRaw opens a raw firehose connection to session over the daemon's
@@ -249,12 +349,15 @@ func (c *Client) WritePane(session string, data []byte) error {
 // framing, so it streams a single session with no exit code or scrollback
 // marker - use the regular NDJSON connection for control and metadata. Pair it
 // with a session created via WithRaw to also skip terminal emulation.
-func (c *Client) AttachRaw(session string) (net.Conn, error) {
+func (c *Client) AttachRaw(session string, ns ...string) (net.Conn, error) {
 	nc, err := net.Dial("unix", rawSocketPath(c.socketPath))
 	if err != nil {
 		return nil, err
 	}
-	if _, err := nc.Write([]byte(session + "\n")); err != nil {
+	// Handshake addresses a session by (namespace, id): "<namespace>\t<id>".
+	// (A bare "<id>" would mean the default namespace, but we always send the
+	// resolved namespace explicitly.)
+	if _, err := nc.Write([]byte(c.ns(ns...) + "\t" + session + "\n")); err != nil {
 		_ = nc.Close()
 		return nil, err
 	}
@@ -297,6 +400,18 @@ func WithSettle(ms int) CaptureOption { return func(m *Message) { m.SettleMs = m
 // WithTimeout caps the total settle wait. ms <= 0 uses the daemon default.
 func WithTimeout(ms int) CaptureOption { return func(m *Message) { m.TimeoutMs = ms } }
 
+// WithCaptureNamespace overrides the connection's default namespace for this
+// one capture call (the per-call override; the SessionOption equivalent for
+// new_session is InNamespace). An empty ns is a no-op (keeps the connection
+// default), matching the per-call override semantics of the other methods.
+func WithCaptureNamespace(ns string) CaptureOption {
+	return func(m *Message) {
+		if ns != "" {
+			m.Namespace = ns
+		}
+	}
+}
+
 // Screen is the rendered visible terminal grid returned by CaptureScreen.
 // Lines holds exactly Rows strings, each space-padded to Cols.
 type Screen struct {
@@ -309,7 +424,7 @@ type Screen struct {
 // CapturePane returns a snapshot of the session's raw scrollback bytes.
 // With WithSettle, it first waits for the screen to go quiet.
 func (c *Client) CapturePane(session string, opts ...CaptureOption) ([]byte, error) {
-	m := Message{Type: TypeCapturePane, Session: session}
+	m := Message{Type: TypeCapturePane, Namespace: c.namespace, Session: session}
 	for _, o := range opts {
 		o(&m)
 	}
@@ -324,7 +439,7 @@ func (c *Client) CapturePane(session string, opts ...CaptureOption) ([]byte, err
 // visible grid, not scrollback). With WithSettle, it first waits for the
 // screen to go quiet - the usual way to read a TUI after sending input.
 func (c *Client) CaptureScreen(session string, opts ...CaptureOption) (*Screen, error) {
-	m := Message{Type: TypeCapturePane, Session: session, Render: true}
+	m := Message{Type: TypeCapturePane, Namespace: c.namespace, Session: session, Render: true}
 	for _, o := range opts {
 		o(&m)
 	}
@@ -344,21 +459,32 @@ func (c *Client) CaptureScreen(session string, opts ...CaptureOption) (*Screen, 
 
 // Resize updates this client's desired size for the session (effective
 // size is the smallest across attached clients).
-func (c *Client) Resize(session string, cols, rows int) error {
-	return c.send(Message{Type: TypeResize, Session: session, Cols: cols, Rows: rows})
+func (c *Client) Resize(session string, cols, rows int, ns ...string) error {
+	return c.send(Message{Type: TypeResize, Namespace: c.ns(ns...), Session: session, Cols: cols, Rows: rows})
 }
 
 // Kill terminates the session's PTY.
-func (c *Client) Kill(session string) error {
-	_, err := c.call(Message{Type: TypeKill, Session: session})
+func (c *Client) Kill(session string, ns ...string) error {
+	_, err := c.call(Message{Type: TypeKill, Namespace: c.ns(ns...), Session: session})
 	return err
 }
 
 // GC reaps every session idle (no PTY input or output) for at least
-// maxIdleSeconds and returns metadata for the sessions it killed.
-// maxIdleSeconds <= 0 reaps every session.
-func (c *Client) GC(maxIdleSeconds int) ([]SessionInfo, error) {
-	reply, err := c.call(Message{Type: TypeGC, MaxIdleSeconds: maxIdleSeconds})
+// maxIdleSeconds in the given namespace (the first argument, if any) or the
+// connection's default namespace, and returns metadata for the sessions it
+// killed. maxIdleSeconds <= 0 reaps every (matching) session. Use GCAll to
+// reap across every namespace.
+func (c *Client) GC(maxIdleSeconds int, ns ...string) ([]SessionInfo, error) {
+	return c.gc(Message{Type: TypeGC, MaxIdleSeconds: maxIdleSeconds, Namespace: c.ns(ns...)})
+}
+
+// GCAll reaps idle sessions across every namespace.
+func (c *Client) GCAll(maxIdleSeconds int) ([]SessionInfo, error) {
+	return c.gc(Message{Type: TypeGC, MaxIdleSeconds: maxIdleSeconds, All: true})
+}
+
+func (c *Client) gc(m Message) ([]SessionInfo, error) {
+	reply, err := c.call(m)
 	if err != nil {
 		return nil, err
 	}

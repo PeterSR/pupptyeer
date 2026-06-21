@@ -50,6 +50,18 @@ type Message struct {
 	ID      int    `json:"id,omitempty"`
 	Session string `json:"session,omitempty"`
 
+	// namespace scopes a session: identity is (namespace, id). Carried by
+	// new_session and every session-addressed verb, and echoed on the
+	// server->client events (output/exit/capture/...) so a client can tell
+	// apart sessions whose ids collide across namespaces. Empty means the
+	// "default" namespace - so old clients that send none operate entirely
+	// there (backward compatible). See PROTOCOL.md.
+	Namespace string `json:"namespace,omitempty"`
+
+	// All, on list_sessions/gc, selects every namespace instead of just the
+	// one in Namespace. An explicit flag, deliberately not a "*" sentinel.
+	All bool `json:"all,omitempty"`
+
 	// new_session
 	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
@@ -104,6 +116,7 @@ type Cursor struct {
 // PTY input or output; gc ages sessions by it.
 type SessionInfo struct {
 	ID           string   `json:"id"`
+	Namespace    string   `json:"namespace"`
 	Command      string   `json:"command"`
 	Args         []string `json:"args,omitempty"`
 	Cwd          string   `json:"cwd,omitempty"`

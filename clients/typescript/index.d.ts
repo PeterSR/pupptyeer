@@ -7,6 +7,20 @@
 /** Removes a previously registered handler. Returned by onOutput/onEvent. */
 export type Unsubscribe = () => void;
 
+/**
+ * The namespace a connection uses when none is given. Session identity is
+ * (namespace, id): ids are unique within a namespace but may repeat across
+ * namespaces.
+ */
+export const DEFAULT_NAMESPACE: "default";
+
+/**
+ * Resolve the daemon socket path the way the CLI and the other clients do:
+ * $PUPPTYEER_SOCK, else $XDG_RUNTIME_DIR/pupptyeer/daemon.sock, else
+ * $TMPDIR/pupptyeer-<uid>/daemon.sock.
+ */
+export function defaultSocketPath(): string;
+
 /** A single unsolicited message from the daemon (output, exit, etc.). */
 export interface Message {
   type: string;
@@ -22,6 +36,8 @@ export interface Message {
 /** Metadata for a live session, as returned by listSessions/gc. */
 export interface SessionInfo {
   id: string;
+  /** The namespace this session lives in. */
+  namespace: string;
   command: string;
   args?: string[];
   cwd?: string;
@@ -46,6 +62,8 @@ export interface NewSessionOptions {
   requestedId?: string;
   /** When an alive session already holds requestedId, return it as-is (continuation) instead of erroring. */
   getOrCreate?: boolean;
+  /** Namespace to create the session in (default: the connection's). */
+  namespace?: string;
 }
 
 export interface EnsureSessionOptions {
@@ -58,11 +76,36 @@ export interface EnsureSessionOptions {
   cols?: number;
   rows?: number;
   raw?: boolean;
+  /** Namespace to operate in (default: the connection's). */
+  namespace?: string;
+}
+
+/** Options for connect: an explicit socket and/or a default namespace. */
+export interface ConnectOptions {
+  /** Explicit daemon socket path; omitted resolves the default location. */
+  socket?: string;
+  /** Connection default namespace; per-call options override it. */
+  namespace?: string;
+}
+
+/** A per-call namespace override, shared by the session-addressed methods. */
+export interface NamespaceOption {
+  namespace?: string;
+}
+
+/** Options for listSessions/gc: a namespace filter or the all-namespaces view. */
+export interface ListOptions {
+  /** Namespace to scope to (default: the connection's); ignored when all is true. */
+  namespace?: string;
+  /** Select every namespace instead of just one. */
+  all?: boolean;
 }
 
 export interface AttachOptions {
   cols?: number;
   rows?: number;
+  /** Namespace override (default: the connection's). */
+  namespace?: string;
 }
 
 export interface CaptureOptions {
@@ -70,6 +113,8 @@ export interface CaptureOptions {
   settleMs?: number;
   /** Cap on the settle wait in ms; <= 0 uses the daemon default. */
   timeoutMs?: number;
+  /** Namespace override (default: the connection's). */
+  namespace?: string;
 }
 
 /** Cursor position in a rendered capture; 0-based, col may equal cols. */
@@ -91,15 +136,23 @@ export interface Screen {
 
 /** Thin client for the pupptyeer daemon (NDJSON over a unix socket). */
 export class PupptyeerClient {
-  /** Connect to the daemon at the given unix socket path. */
-  static connect(path: string): Promise<PupptyeerClient>;
+  /** The connection's default namespace. */
+  readonly namespace: string;
+
+  /**
+   * Connect to the daemon. Pass a socket path string, or an options object
+   * { socket?, namespace? }. With no socket it resolves the default location;
+   * on an unreachable daemon it rejects with one canonical, actionable error.
+   * It never spawns a daemon.
+   */
+  static connect(opts?: string | ConnectOptions): Promise<PupptyeerClient>;
 
   /**
    * Register a handler for a session's live output. Multiple handlers per
    * session are supported (they all fire); returns a function that
-   * unsubscribes this handler.
+   * unsubscribes this handler. Output is keyed by (namespace, session).
    */
-  onOutput(session: string, fn: (bytes: Buffer) => void): Unsubscribe;
+  onOutput(session: string, fn: (bytes: Buffer) => void, opts?: NamespaceOption): Unsubscribe;
 
   /**
    * Register a handler for every unsolicited message. Returns a function
@@ -118,20 +171,23 @@ export class PupptyeerClient {
    */
   ensureSession(opts: EnsureSessionOptions): Promise<boolean>;
 
-  /** List metadata for all live sessions. */
-  listSessions(): Promise<SessionInfo[]>;
+  /**
+   * List metadata for live sessions in opts.namespace (default: the
+   * connection's), or across every namespace with { all: true }.
+   */
+  listSessions(opts?: ListOptions): Promise<SessionInfo[]>;
 
   /** Subscribe this connection to the session's live output. */
   attach(session: string, opts?: AttachOptions): Promise<void>;
 
   /** Stop this connection's subscription to the session. */
-  detach(session: string): void;
+  detach(session: string, opts?: NamespaceOption): void;
 
   /** Send UTF-8 text to the session's PTY input. */
-  writePane(session: string, text: string): void;
+  writePane(session: string, text: string, opts?: NamespaceOption): void;
 
   /** Send raw bytes to the session's PTY input. */
-  writeBytes(session: string, buf: Uint8Array | Buffer): void;
+  writeBytes(session: string, buf: Uint8Array | Buffer, opts?: NamespaceOption): void;
 
   /**
    * Snapshot the session's raw scrollback bytes. With opts.settleMs, first
@@ -147,16 +203,18 @@ export class PupptyeerClient {
   captureScreen(session: string, opts?: CaptureOptions): Promise<Screen>;
 
   /** Update this client's desired size for the session. */
-  resize(session: string, cols: number, rows: number): void;
+  resize(session: string, cols: number, rows: number, opts?: NamespaceOption): void;
 
   /** Terminate the session's PTY. */
-  kill(session: string): Promise<void>;
+  kill(session: string, opts?: NamespaceOption): Promise<void>;
 
   /**
-   * Reap sessions idle (no PTY input/output) for >= maxIdleSeconds;
-   * resolves to the reaped SessionInfo[]. maxIdleSeconds <= 0 reaps all.
+   * Reap sessions idle (no PTY input/output) for >= maxIdleSeconds in
+   * opts.namespace (default: the connection's) or across every namespace with
+   * { all: true }; resolves to the reaped SessionInfo[]. maxIdleSeconds <= 0
+   * reaps all (matching).
    */
-  gc(maxIdleSeconds: number): Promise<SessionInfo[]>;
+  gc(maxIdleSeconds: number, opts?: ListOptions): Promise<SessionInfo[]>;
 
   /** Close the connection. Sessions outlive the client. */
   close(): void;

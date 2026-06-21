@@ -46,6 +46,16 @@ type Message struct {
 	ID      int    `json:"id,omitempty"`
 	Session string `json:"session,omitempty"`
 
+	// namespace scopes a session: identity is (namespace, id). Carried by
+	// new_session and every session-addressed verb, and echoed on the
+	// server->client events so ids that collide across namespaces stay
+	// distinguishable. Empty means the "default" namespace. See PROTOCOL.md.
+	Namespace string `json:"namespace,omitempty"`
+
+	// All, on list_sessions/gc, selects every namespace instead of just the
+	// one in Namespace.
+	All bool `json:"all,omitempty"`
+
 	// new_session
 	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
@@ -97,6 +107,7 @@ type Cursor struct {
 // PTY input or output.
 type SessionInfo struct {
 	ID           string   `json:"id"`
+	Namespace    string   `json:"namespace"`
 	Command      string   `json:"command"`
 	Args         []string `json:"args,omitempty"`
 	Cwd          string   `json:"cwd,omitempty"`

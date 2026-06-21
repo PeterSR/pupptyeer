@@ -27,13 +27,20 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 
 	s.AddTool(
 		mcp.NewTool("list_sessions",
-			mcp.WithDescription("List all live PTY sessions with their metadata.")),
+			mcp.WithDescription("List live PTY sessions with their metadata. Scoped to namespace (default \"default\") unless all_namespaces is set."),
+			mcp.WithString("namespace", mcp.Description("namespace to list (default \"default\")")),
+			mcp.WithBoolean("all_namespaces", mcp.Description("list sessions across every namespace instead of just one"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
 				return mcp.NewToolResultErrorf("daemon not reachable: %v", err), nil
 			}
-			sessions, err := c.ListSessions()
+			var sessions []client.SessionInfo
+			if r.GetBool("all_namespaces", false) {
+				sessions, err = c.ListAllSessions()
+			} else {
+				sessions, err = c.ListSessions(r.GetString("namespace", ""))
+			}
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
@@ -51,7 +58,8 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			mcp.WithInteger("rows", mcp.Description("initial rows (default 24)")),
 			mcp.WithBoolean("raw", mcp.Description("don't run a terminal emulator for this session (lower CPU/latency); read_screen rendered grid is then unavailable, raw scrollback still works. Default false.")),
 			mcp.WithString("requested_id", mcp.Description("use this string as the session id instead of a daemon-generated UUID. If an alive session already holds it, this errors unless get_or_create is set.")),
-			mcp.WithBoolean("get_or_create", mcp.Description("when an alive session already holds requested_id, return that existing session as-is (continuation: same id, same live program) instead of erroring. Default false."))),
+			mcp.WithBoolean("get_or_create", mcp.Description("when an alive session already holds requested_id, return that existing session as-is (continuation: same id, same live program) instead of erroring. Default false.")),
+			mcp.WithString("namespace", mcp.Description("namespace to create the session in (default \"default\"). Session identity is (namespace, id): the same id may exist in different namespaces."))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -66,6 +74,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 				Raw         bool     `json:"raw"`
 				RequestedID string   `json:"requested_id"`
 				GetOrCreate bool     `json:"get_or_create"`
+				Namespace   string   `json:"namespace"`
 			}
 			if err := r.BindArguments(&a); err != nil {
 				return mcp.NewToolResultErrorf("bad arguments: %v", err), nil
@@ -86,6 +95,9 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if a.GetOrCreate {
 				opts = append(opts, client.WithGetOrCreate())
 			}
+			if a.Namespace != "" {
+				opts = append(opts, client.InNamespace(a.Namespace))
+			}
 			id, err := c.NewSession(a.Command, a.Args, a.Cwd, nil, a.Cols, a.Rows, opts...)
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
@@ -97,7 +109,8 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 		mcp.NewTool("send_keys",
 			mcp.WithDescription(`Write text to a session's PTY input. Include a trailing \n / \r to submit a line.`),
 			mcp.WithString("session", mcp.Description("session id"), mcp.Required()),
-			mcp.WithString("text", mcp.Description("text to type"), mcp.Required())),
+			mcp.WithString("text", mcp.Description("text to type"), mcp.Required()),
+			mcp.WithString("namespace", mcp.Description("session's namespace (default \"default\")"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -111,7 +124,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
-			if err := c.WritePane(session, []byte(text)); err != nil {
+			if err := c.WritePane(session, []byte(text), r.GetString("namespace", "")); err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
 			return mcp.NewToolResultText("ok"), nil
@@ -123,7 +136,8 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			mcp.WithString("session", mcp.Description("session id"), mcp.Required()),
 			mcp.WithBoolean("render", mcp.Description("rendered visible grid (default true); false for raw scrollback text")),
 			mcp.WithNumber("settle_ms", mcp.Description("wait until no output for this many ms before reading (0 = no wait)")),
-			mcp.WithNumber("timeout_ms", mcp.Description("cap on the settle wait in ms; <=0 uses the daemon default"))),
+			mcp.WithNumber("timeout_ms", mcp.Description("cap on the settle wait in ms; <=0 uses the daemon default")),
+			mcp.WithString("namespace", mcp.Description("session's namespace (default \"default\")"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -139,6 +153,9 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			}
 			if ms := r.GetInt("timeout_ms", 0); ms > 0 {
 				opts = append(opts, client.WithTimeout(ms))
+			}
+			if ns := r.GetString("namespace", ""); ns != "" {
+				opts = append(opts, client.WithCaptureNamespace(ns))
 			}
 			if !r.GetBool("render", true) {
 				data, err := c.CapturePane(session, opts...)
@@ -166,7 +183,8 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			mcp.WithDescription("Set this client's desired size for the session (effective size = smallest across attached clients)."),
 			mcp.WithString("session", mcp.Description("session id"), mcp.Required()),
 			mcp.WithInteger("cols", mcp.Description("columns"), mcp.Required()),
-			mcp.WithInteger("rows", mcp.Description("rows"), mcp.Required())),
+			mcp.WithInteger("rows", mcp.Description("rows"), mcp.Required()),
+			mcp.WithString("namespace", mcp.Description("session's namespace (default \"default\")"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -176,7 +194,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
-			if err := c.Resize(session, r.GetInt("cols", 0), r.GetInt("rows", 0)); err != nil {
+			if err := c.Resize(session, r.GetInt("cols", 0), r.GetInt("rows", 0), r.GetString("namespace", "")); err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
 			return mcp.NewToolResultText("ok"), nil
@@ -185,7 +203,8 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 	s.AddTool(
 		mcp.NewTool("kill",
 			mcp.WithDescription("Terminate a session's PTY."),
-			mcp.WithString("session", mcp.Description("session id"), mcp.Required())),
+			mcp.WithString("session", mcp.Description("session id"), mcp.Required()),
+			mcp.WithString("namespace", mcp.Description("session's namespace (default \"default\")"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
@@ -195,7 +214,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
-			if err := c.Kill(session); err != nil {
+			if err := c.Kill(session, r.GetString("namespace", "")); err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}
 			return mcp.NewToolResultText("ok"), nil
@@ -203,14 +222,21 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 
 	s.AddTool(
 		mcp.NewTool("gc",
-			mcp.WithDescription("Reap sessions idle (no PTY input or output) for at least max_idle_seconds; returns the reaped sessions' metadata as JSON. max_idle_seconds=0 reaps every session. Attaching alone does not count as activity."),
-			mcp.WithInteger("max_idle_seconds", mcp.Description("minimum idle seconds before a session is reaped (0 = all)"), mcp.Required())),
+			mcp.WithDescription("Reap sessions idle (no PTY input or output) for at least max_idle_seconds; returns the reaped sessions' metadata as JSON. max_idle_seconds=0 reaps every session. Attaching alone does not count as activity. Scoped to namespace (default \"default\") unless all_namespaces is set, so it cannot reap another namespace's sessions."),
+			mcp.WithInteger("max_idle_seconds", mcp.Description("minimum idle seconds before a session is reaped (0 = all)"), mcp.Required()),
+			mcp.WithString("namespace", mcp.Description("namespace to reap within (default \"default\")")),
+			mcp.WithBoolean("all_namespaces", mcp.Description("reap idle sessions across every namespace instead of just one"))),
 		func(ctx context.Context, r mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			c, err := d.get()
 			if err != nil {
 				return mcp.NewToolResultErrorf("daemon not reachable: %v", err), nil
 			}
-			reaped, err := c.GC(r.GetInt("max_idle_seconds", 0))
+			var reaped []client.SessionInfo
+			if r.GetBool("all_namespaces", false) {
+				reaped, err = c.GCAll(r.GetInt("max_idle_seconds", 0))
+			} else {
+				reaped, err = c.GC(r.GetInt("max_idle_seconds", 0), r.GetString("namespace", ""))
+			}
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}

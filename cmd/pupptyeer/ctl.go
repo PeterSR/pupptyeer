@@ -20,17 +20,53 @@ import (
 
 func runCtl(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pupptyeer ctl <list|new|send|capture|attach|expect|resize|kill|gc> [args...]")
+		return errors.New("usage: pupptyeer ctl [-n <namespace>] <list|new|send|capture|attach|expect|resize|kill|gc> [args...]")
 	}
-	c, err := client.Dial(socketPath())
+	// Namespace selection: -n/--namespace <ns> scopes the connection (default
+	// "default"); --all-namespaces/-A is the cross-cutting view, valid only for
+	// list and gc. Consumed only from the LEADING run (before the subcommand) so
+	// a subcommand's free-form payload is never touched - e.g. `ctl new grep -n
+	// foo file` must pass `-n foo` to grep, and `ctl send <id> -n` must type the
+	// literal text. list and gc have no free-form positional payload, so for
+	// those we also accept the flags after the subcommand (k8s muscle memory).
+	ns, allNS, rest, err := extractNSFlags(args, true)
 	if err != nil {
-		return fmt.Errorf("dial daemon (is it running?): %w", err)
+		return err
+	}
+	if len(rest) == 0 {
+		return errors.New("usage: pupptyeer ctl [-n <namespace>] <list|new|send|capture|attach|expect|resize|kill|gc> [args...]")
+	}
+	cmd := rest[0]
+	sub := rest[1:]
+	if cmd == "list" || cmd == "gc" {
+		ns2, all2, sub2, err := extractNSFlags(sub, false)
+		if err != nil {
+			return err
+		}
+		if ns2 != "" {
+			ns = ns2
+		}
+		allNS = allNS || all2
+		sub = sub2
+	}
+	if allNS && cmd != "list" && cmd != "gc" {
+		return errors.New("--all-namespaces is only valid for list and gc")
+	}
+	c, err := client.Connect(client.WithSocket(socketPath()), client.WithNamespace(ns))
+	if err != nil {
+		return err
 	}
 	defer c.Close()
+	args = append([]string{cmd}, sub...)
 
 	switch args[0] {
 	case "list":
-		sessions, err := c.ListSessions()
+		var sessions []client.SessionInfo
+		if allNS {
+			sessions, err = c.ListAllSessions()
+		} else {
+			sessions, err = c.ListSessions()
+		}
 		if err != nil {
 			return err
 		}
@@ -39,8 +75,8 @@ func runCtl(args []string) error {
 			return nil
 		}
 		for _, s := range sessions {
-			fmt.Printf("%s  %dx%d  attached=%d  alive=%v  %s\n",
-				s.ID, s.Cols, s.Rows, s.Attached, s.Alive, s.Command)
+			fmt.Printf("%s  %s  %dx%d  attached=%d  alive=%v  %s\n",
+				s.Namespace, s.ID, s.Cols, s.Rows, s.Attached, s.Alive, s.Command)
 		}
 		return nil
 
@@ -195,7 +231,12 @@ func runCtl(args []string) error {
 		if *maxIdle < 0 {
 			return errors.New(gcUsage)
 		}
-		reaped, err := c.GC(int(maxIdle.Seconds()))
+		var reaped []client.SessionInfo
+		if allNS {
+			reaped, err = c.GCAll(int(maxIdle.Seconds()))
+		} else {
+			reaped, err = c.GC(int(maxIdle.Seconds()))
+		}
 		if err != nil {
 			return err
 		}
@@ -209,7 +250,7 @@ func runCtl(args []string) error {
 			if t, err := time.Parse(time.RFC3339, s.LastActivity); err == nil {
 				idle = now.Sub(t).Round(time.Second).String()
 			}
-			fmt.Printf("reaped %s  idle=%s  %s\n", s.ID, idle, s.Command)
+			fmt.Printf("reaped %s/%s  idle=%s  %s\n", s.Namespace, s.ID, idle, s.Command)
 		}
 		fmt.Printf("reaped %d session(s)\n", len(reaped))
 		return nil
@@ -217,6 +258,39 @@ func runCtl(args []string) error {
 	default:
 		return fmt.Errorf("unknown ctl command %q", args[0])
 	}
+}
+
+// extractNSFlags pulls the namespace flags out of an argument list, returning
+// the chosen namespace (empty => the client's default), whether --all-namespaces
+// was given, and the remaining args with the flags removed. Recognised:
+// "-n"/"--namespace" <ns> and "-A"/"--all-namespaces". With leadingOnly it
+// consumes them only from the front and stops at the first other token, so a
+// subcommand and its free-form payload (a command + its argv, or verbatim send
+// text) are returned untouched. Without it, the flags may appear anywhere -
+// safe only for args with no free-form positional payload (list, gc).
+func extractNSFlags(args []string, leadingOnly bool) (ns string, all bool, rest []string, err error) {
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-n", "--namespace":
+			if i+1 >= len(args) {
+				return "", false, nil, errors.New("-n/--namespace requires a namespace argument")
+			}
+			ns = args[i+1]
+			i += 2
+		case "-A", "--all-namespaces":
+			all = true
+			i++
+		default:
+			if leadingOnly {
+				rest = append(rest, args[i:]...)
+				return ns, all, rest, nil
+			}
+			rest = append(rest, args[i])
+			i++
+		}
+	}
+	return ns, all, rest, nil
 }
 
 // parseDim parses a terminal dimension argument (cols/rows), rejecting
@@ -359,7 +433,7 @@ func ctlAttachInteractive(c *client.Client, session string, cfg config) error {
 			if !ok {
 				return nil
 			}
-			if m.Session != session {
+			if m.Session != session || m.Namespace != c.Namespace() {
 				continue
 			}
 			switch m.Type {
@@ -395,7 +469,7 @@ func ctlAttach(c *client.Client, session string) error {
 			if !ok {
 				return nil
 			}
-			if m.Session != session {
+			if m.Session != session || m.Namespace != c.Namespace() {
 				continue
 			}
 			switch m.Type {
@@ -556,7 +630,7 @@ func ctlExpect(c *client.Client, args []string) error {
 				fmt.Println("closed")
 				return &exitError{code: 3}
 			}
-			if m.Session != session {
+			if m.Session != session || m.Namespace != c.Namespace() {
 				continue
 			}
 			switch m.Type {

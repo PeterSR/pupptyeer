@@ -21,9 +21,23 @@ Each runner uses a unique marker (`<LANG>-<nanotime>`) and `$PUPPTYEER_SOCK`.
 13. **gc**: `new_session` a second `cat` (`id2`), then `gc(0)` → the returned reaped list includes `id2`, and within 2s `list_sessions` no longer includes `id2`.
 14. **raw session**: `new_session` running `cat` with `raw:true` (`id4`) → assert a non-empty id and that its `SessionInfo` in `list_sessions` reports `raw == true`. Then **kill** `id4`.
 15. **caller-supplied id**: `new_session` running `cat` with `requested_id = "conf-<marker>"` (`id5`) → assert the returned id **equals** the requested id. Then `new_session` again with the **same** `requested_id` and `get_or_create:true` → assert it returns the **same** id (continuation, no new process). Then `new_session` once more with the same `requested_id` **without** `get_or_create` → assert it **errors** (a live clash). Then **kill** `id5`.
-16. print `OK <lang>` and exit 0. Any failed assertion → print `FAIL[<lang>] …` and exit non-zero.
+16. **namespaces**: session identity is `(namespace, id)`. Pick two namespaces `nsA = "nsA-<marker>"`,
+    `nsB = "nsB-<marker>"` and one shared id `dup = "dup-<marker>"`.
+    1. `new_session` `cat` with `requested_id = dup` in `nsA` → assert the returned id equals `dup`.
+    2. `new_session` `cat` with `requested_id = dup` in `nsB` → assert it **also** returns `dup`
+       (the same id in a different namespace is **not** a collision; no error).
+    3. **scoped list**: `list_sessions` filtered to `nsA` includes `dup` and every entry reports
+       `namespace == nsA`; likewise the `nsB` list includes `dup` and reports `namespace == nsB`.
+    4. **isolation**: `kill` `dup` in `nsA`, then within 2s `list_sessions(nsA)` no longer includes
+       `dup`, **but** `list_sessions(nsB)` **still** includes `dup` (an op in one namespace cannot
+       touch another's session).
+    5. **omitted namespace lands in `default`**: `new_session` `cat` with `requested_id = "def-<marker>"`
+       using the connection's default namespace (no per-call namespace) → assert it appears in the
+       `default` list and **not** in the `nsB` list.
+    6. Clean up: `kill` `dup` in `nsB` and the default session.
+17. print `OK <lang>` and exit 0. Any failed assertion → print `FAIL[<lang>] …` and exit non-zero.
 
 This exercises: server-assigned ids, attach/stream, write+echo, capture, list, detach,
-persistence, reattach replay, kill+reap, rendered capture + settle, gc-by-idle, and
-caller-supplied ids with get-or-create continuation - i.e. the whole verb set and the
-load-bearing semantics from [PROTOCOL.md](../PROTOCOL.md).
+persistence, reattach replay, kill+reap, rendered capture + settle, gc-by-idle,
+caller-supplied ids with get-or-create continuation, and namespace isolation - i.e. the whole
+verb set and the load-bearing semantics from [PROTOCOL.md](../PROTOCOL.md).

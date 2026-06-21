@@ -45,10 +45,13 @@ Usage:
   pupptyeer daemon install         install + start as a per-user service (auto-start at login)
   pupptyeer daemon uninstall       stop + remove the service
   pupptyeer daemon start|stop|restart|status   manage the installed service
-  pupptyeer ctl <cmd> [args...]    drive the daemon (list|new|send|capture|attach|expect|resize|kill)
+  pupptyeer ctl [-n <ns>] <cmd> [args...]   drive the daemon (list|new|send|capture|attach|expect|resize|kill)
   pupptyeer version
 
 The MCP server is a separate binary: pupptyeer-mcp (stdio or http).
+
+Sessions are addressed by (namespace, id). Per subcommand, -n/--namespace <ns> scopes the
+operation (default "default"); --all-namespaces works on list and gc.
 
 Socket path: $PUPPTYEER_SOCK, else $XDG_RUNTIME_DIR/pupptyeer/daemon.sock,
 else $TMPDIR/pupptyeer-<uid>/daemon.sock

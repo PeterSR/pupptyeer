@@ -21,28 +21,43 @@ base64-encoded in the `data` field (so newlines/control bytes never break framin
 | decoder max line | 1 MiB |
 | capture settle default timeout | 5 s |
 
+## Namespaces
+A session is addressed by `(namespace, id)`. `namespace` is a string; **omitted or empty everywhere
+means `"default"`**, so a client that never sends one operates entirely in `default` (backward
+compatible). Ids are unique **within** a namespace; the same id may exist in two namespaces without
+colliding (the `requested_id` clash check is per-namespace). Namespaces are **implicit**: there are
+no create/delete verbs; a namespace exists while it holds sessions and vanishes when empty. They are
+an organizational boundary on a single-user local daemon, not a security one.
+
+Every session-addressed verb carries `namespace` (defaulting to `default`). `list_sessions` and `gc`
+take an optional `namespace` filter (omitted ⇒ `default`) or an explicit `all: true` flag for the
+cross-cutting view (no `"*"` sentinel). The server→client events (`output`, `exit`, `capture`,
+`attached`, `scrollback_end`, `session_closed`, `ok`, `error`) echo `namespace` so a client can tell
+apart ids that collide across namespaces. `SessionInfo` carries `namespace`.
+
 ## Messages
 A single object shape; `type` discriminates. `id` (int, >0) correlates a request with its reply.
 
 ### Client → Server
 | type | fields | reply |
 |---|---|---|
-| `new_session` | `command`, `args?`, `cwd?`, `env?`, `cols`, `rows`, `raw?`, `requested_id?`, `get_or_create?` | `ok{session}` |
-| `list_sessions` | - | `sessions{sessions[]}` |
-| `attach` | `session`, `cols?`, `rows?` | `attached`, then `output…`, then `scrollback_end` |
-| `detach` | `session` | - |
-| `write_pane` | `session`, `data`(base64) **or** `text` | - (error on failure) |
-| `capture_pane` | `session`, `render?`, `settle_ms?`, `timeout_ms?` | `capture{data}` or, with `render`, `capture{cols,rows,lines[],cursor,alt_screen}` |
-| `resize` | `session`, `cols`, `rows` | - |
-| `kill` | `session` | `ok` |
-| `gc` | `max_idle_seconds` | `reaped{sessions[]}` |
+| `new_session` | `command`, `args?`, `cwd?`, `env?`, `cols`, `rows`, `raw?`, `requested_id?`, `get_or_create?`, `namespace?` | `ok{session, namespace}` |
+| `list_sessions` | `namespace?`, `all?` | `sessions{sessions[]}` |
+| `attach` | `session`, `namespace?`, `cols?`, `rows?` | `attached`, then `output…`, then `scrollback_end` |
+| `detach` | `session`, `namespace?` | - |
+| `write_pane` | `session`, `namespace?`, `data`(base64) **or** `text` | - (error on failure) |
+| `capture_pane` | `session`, `namespace?`, `render?`, `settle_ms?`, `timeout_ms?` | `capture{data}` or, with `render`, `capture{cols,rows,lines[],cursor,alt_screen}` |
+| `resize` | `session`, `namespace?`, `cols`, `rows` | - |
+| `kill` | `session`, `namespace?` | `ok` |
+| `gc` | `max_idle_seconds`, `namespace?`, `all?` | `reaped{sessions[]}` |
 
 ### Server → Client
-`ok{session?}` · `error{message}` · `sessions{sessions[]}` · `attached` · `output{data}` ·
-`scrollback_end` · `capture{data | cols,rows,lines[],cursor,alt_screen}` · `exit{exit_code}` ·
-`session_closed` · `reaped{sessions[]}`
+`ok{session?, namespace?}` · `error{message, namespace?}` · `sessions{sessions[]}` · `attached` ·
+`output{namespace, data}` · `scrollback_end` · `capture{data | cols,rows,lines[],cursor,alt_screen}` ·
+`exit{namespace, exit_code}` · `session_closed{namespace}` · `reaped{sessions[]}`. Every
+session-tagged message carries `namespace` alongside `session`.
 
-`SessionInfo`: `{ id, command, args?, cwd?, cols, rows, created(RFC3339), last_activity(RFC3339), attached, alive, raw? }`.
+`SessionInfo`: `{ id, namespace, command, args?, cwd?, cols, rows, created(RFC3339), last_activity(RFC3339), attached, alive, raw? }`.
 `Cursor` (rendered capture): `{ row, col, visible }`, 0-based; `row` in `[0,rows)`, `col` in `[0,cols]` (`col == cols` is a pending-wrap cursor).
 `last_activity` is the time of the most recent PTY input or output (initialised to `created`).
 An empty session list is normalised to `[]` (never `null`) at the client surface - this applies to
@@ -70,10 +85,12 @@ only where it's wanted (today: the Go client's `AttachRaw`; `socat`/`nc` work wi
 
 Per connection, newline-terminated handshake then pure bytes:
 ```
-client → "<session-id>\n"
+client → "<session-id>\n"                 (the default namespace)
+      or  "<namespace>\t<session-id>\n"   (tab-delimited, to target another namespace)
 server → "OK\n"             then: raw scrollback replay, then live PTY bytes (unframed)
       or  "ERR <message>\n" then: the daemon closes the connection
 ```
+A bare id keeps targeting the `default` namespace, so existing `socat`/`nc` users are unaffected.
 After `OK` the stream is a transparent bidirectional pipe to that one session's PTY: bytes the client
 writes go straight to PTY input; bytes the PTY emits stream straight back - no base64, no JSON, no
 framing, no terminal emulation. One session per raw connection (no multiplexing - that is the cost of
