@@ -89,10 +89,14 @@ type Session struct {
 	// lastActivity is the UnixNano of the most recent PTY input or output.
 	lastActivity atomic.Int64
 
-	// mu guards ring, the emulator, cursorVisible, and effCols/effRows.
-	mu            sync.Mutex
-	ring          *ringBuffer
-	term          *vt.Emulator
+	// mu guards ring, the emulator, scorc, cursorVisible, and effCols/effRows.
+	mu   sync.Mutex
+	ring *ringBuffer
+	term *vt.Emulator
+	// scorc rewrites ESC[u into ESC8 on the way into term only (see
+	// scorc.go). It is touched only from readLoop, which always holds mu
+	// already while it does so, so it needs no lock of its own.
+	scorc         *scorcRewriter
 	cursorVisible bool
 	effCols       int
 	effRows       int
@@ -156,6 +160,7 @@ func Start(cfg Config) (*Session, error) {
 		s.term.SetCallbacks(vt.Callbacks{
 			CursorVisibility: func(visible bool) { s.cursorVisible = visible },
 		})
+		s.scorc = &scorcRewriter{}
 		s.wg.Add(1)
 		go s.drainTerm()
 	}
@@ -208,7 +213,10 @@ func (s *Session) readLoop() {
 			s.mu.Lock()
 			s.ring.append(chunk)
 			if s.term != nil {
-				_, _ = s.term.Write(chunk) // update the live grid in lockstep with the ring
+				// Feed the emulator a scorc-rewritten copy (ESC[u -> ESC8;
+				// see scorc.go) so SCO restore-cursor renders correctly. The
+				// ring above and onOutput below still see the raw chunk.
+				_, _ = s.term.Write(s.scorc.translate(chunk))
 			}
 			if s.onOutput != nil {
 				s.onOutput(chunk)
