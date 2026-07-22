@@ -3,11 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kardianos/service"
 
@@ -98,6 +100,22 @@ func newDaemon() (*server.Server, string, error) {
 	// sets a restrictive ACL to uphold the local-only guarantee.
 	if err := secureSocketDir(dir); err != nil {
 		return nil, "", fmt.Errorf("secure socket dir: %w", err)
+	}
+	// Refuse to clobber a live daemon. The stale-socket removal just below
+	// would unlink a socket another daemon is actively listening on, and that
+	// does not stop it: it keeps running and serving its sessions, but on an
+	// orphaned socket inode no path resolves to any more, so it becomes
+	// permanently unreachable (its sessions unattachable, uncontrollable). A
+	// successful dial means someone is home; connection-refused or a missing
+	// file means the socket is stale or absent and is safe to remove. This is
+	// the same guard for the foreground run and the managed service: a normal
+	// service restart closes the old listener before the new one starts, so
+	// this never trips on a legitimate restart, only on a second daemon racing
+	// a live one (classically, running `pupptyeer daemon` by hand while the
+	// service is up).
+	if c, err := net.DialTimeout("unix", sock, 200*time.Millisecond); err == nil {
+		_ = c.Close()
+		return nil, "", fmt.Errorf("a pupptyeer daemon is already listening on %s; refusing to start another (stop it first with `pupptyeer daemon stop`)", sock)
 	}
 	// Remove a stale socket from a previous unclean exit.
 	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
