@@ -81,3 +81,39 @@ func TestRawSessionHasNoRenderedCapture(t *testing.T) {
 		t.Errorf("CaptureRaw on a raw session should work: %v", err)
 	}
 }
+
+// TestSCORestoreCursor is the regression case for issue #4: the upstream
+// emulator handles ESC[s (SCOSC, save cursor) but has no handler at all for
+// ESC[u (SCORC, restore cursor), so without the local rewrite in scorc.go
+// the restore is silently dropped and "BB" lands wherever the cursor already
+// was, rendering "AAAABB" instead of the correct "BBAA".
+func TestSCORestoreCursor(t *testing.T) {
+	s, err := Start(Config{
+		Command: "sh",
+		Args:    []string{"-c", "printf '\\033[2J\\033[1;1H\\033[sAAAA\\033[uBB'; sleep 5"},
+		Cols:    40,
+		Rows:    10,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	scr, err := s.CaptureScreen(100*time.Millisecond, 3*time.Second)
+	if err != nil {
+		t.Fatalf("CaptureScreen: %v", err)
+	}
+	if got := strings.TrimRight(scr.Lines[0], " "); got != "BBAA" {
+		t.Errorf("row 0 = %q, want %q (ESC[u should restore the cursor ESC[s saved)", got, "BBAA")
+	}
+
+	// The ring is untouched by the rewrite: it must still hold the literal
+	// ESC[u bytes the child actually wrote.
+	raw, err := s.CaptureRaw(0, time.Second)
+	if err != nil {
+		t.Fatalf("CaptureRaw: %v", err)
+	}
+	if !strings.Contains(string(raw), "\x1b[u") {
+		t.Errorf("raw scrollback should keep the literal ESC[u sequence, got %q", raw)
+	}
+}

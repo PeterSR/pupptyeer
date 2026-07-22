@@ -89,10 +89,14 @@ type Session struct {
 	// lastActivity is the UnixNano of the most recent PTY input or output.
 	lastActivity atomic.Int64
 
-	// mu guards ring, the emulator, cursorVisible, and effCols/effRows.
-	mu            sync.Mutex
-	ring          *ringBuffer
-	term          *vt.Emulator
+	// mu guards ring, the emulator, scorc, cursorVisible, and effCols/effRows.
+	mu   sync.Mutex
+	ring *ringBuffer
+	term *vt.Emulator
+	// scorc rewrites ESC[u into ESC8 on the way into term only (see
+	// scorc.go). It is touched only from readLoop, which always holds mu
+	// already while it does so, so it needs no lock of its own.
+	scorc         *scorcRewriter
 	cursorVisible bool
 	effCols       int
 	effRows       int
@@ -156,6 +160,7 @@ func Start(cfg Config) (*Session, error) {
 		s.term.SetCallbacks(vt.Callbacks{
 			CursorVisibility: func(visible bool) { s.cursorVisible = visible },
 		})
+		s.scorc = &scorcRewriter{}
 		s.wg.Add(1)
 		go s.drainTerm()
 	}
@@ -208,7 +213,10 @@ func (s *Session) readLoop() {
 			s.mu.Lock()
 			s.ring.append(chunk)
 			if s.term != nil {
-				_, _ = s.term.Write(chunk) // update the live grid in lockstep with the ring
+				// Feed the emulator a scorc-rewritten copy (ESC[u -> ESC8;
+				// see scorc.go) so SCO restore-cursor renders correctly. The
+				// ring above and onOutput below still see the raw chunk.
+				_, _ = s.term.Write(s.scorc.translate(chunk))
 			}
 			if s.onOutput != nil {
 				s.onOutput(chunk)
@@ -222,8 +230,40 @@ func (s *Session) readLoop() {
 	s.finish()
 }
 
-// finish reaps the child, records the exit code, closes the emulator, and
-// signals waiters. Runs exactly once.
+// closeTerm releases the emulator's reply pipe, which unblocks drainTerm's
+// io.Copy and any readLoop parked in term.Write. No-op on a raw session.
+//
+// It deliberately does NOT call Emulator.Close. Upstream guards both Close
+// and Read with e.closed, a plain unsynchronised bool, so closing while
+// drainTerm sits parked inside Read is a data race (go test -race flags it).
+// Locking cannot fix that: holding a lock across the blocking Read would
+// deadlock the very Close it is meant to guard. But the flag was never what
+// unblocked anything - Close's own e.pw.CloseWithError(io.EOF) is, and that
+// pipe is internally synchronised and safe to close twice, which matters
+// because finish and Kill both land here in either order. Closing it
+// ourselves leaves e.closed written by nobody, and a field only ever read
+// cannot race. Replies the emulator emits afterwards (DSR, DA, in-band
+// resize) fail fast with ErrClosedPipe, which it already discards, so
+// term.Write and term.Resize stay non-blocking.
+//
+// The fallback keeps a future upstream change to InputPipe's type degrading
+// to a goroutine that still exits, racily as before, rather than one that
+// leaks.
+func (s *Session) closeTerm() {
+	if s.term == nil {
+		return
+	}
+	// Interface assertion rather than *io.PipeWriter so any pipe-like writer works.
+	type errCloser interface{ CloseWithError(error) error }
+	if pw, ok := s.term.InputPipe().(errCloser); ok {
+		_ = pw.CloseWithError(io.EOF)
+		return
+	}
+	_ = s.term.Close() // fallback: leaks no goroutine, but races as before
+}
+
+// finish reaps the child, records the exit code, closes the emulator's reply
+// pipe, and signals waiters. Runs exactly once.
 func (s *Session) finish() {
 	s.finishOnce.Do(func() {
 		exitCode := 0
@@ -237,11 +277,10 @@ func (s *Session) finish() {
 		}
 		s.exitCode.Store(int32(exitCode))
 		s.alive.Store(false)
-		// readLoop has stopped, so no more term.Write; closing the emulator
-		// unblocks drainTerm's io.Copy so it can exit. nil for raw sessions.
-		if s.term != nil {
-			_ = s.term.Close()
-		}
+		// readLoop has stopped, so no more term.Write; closing the emulator's
+		// input pipe unblocks drainTerm's io.Copy so it can exit. No-op for
+		// raw sessions (s.term == nil).
+		s.closeTerm()
 		close(s.exited)
 		if s.onExit != nil {
 			s.onExit(exitCode)
@@ -462,11 +501,10 @@ func (s *Session) Kill() {
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
-	// Closing the emulator unblocks readLoop should it ever be parked in
-	// term.Write, so wg.Wait below cannot deadlock. Idempotent with finish().
-	if s.term != nil {
-		_ = s.term.Close()
-	}
+	// Closing the emulator's input pipe unblocks readLoop should it ever be
+	// parked in term.Write, so wg.Wait below cannot deadlock. Idempotent with
+	// finish() (see closeTerm).
+	s.closeTerm()
 	s.wg.Wait()
 }
 
