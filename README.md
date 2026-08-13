@@ -68,6 +68,8 @@ pupptyeer daemon uninstall                   # stop + remove
 ./bin/pupptyeer ctl expect --exit <id>       # ...or until the child process exits (prints its code)
 ./bin/pupptyeer ctl expect --regex 'ERROR' --follow --strip-ansi <id>   # one line per hit; wrap in a watcher
 ./bin/pupptyeer ctl kill <id>
+./bin/pupptyeer ctl steal 12345              # Unix only: start a session that runs `reptyr 12345`, then attach to it
+./bin/pupptyeer ctl steal -T --id lifted 12345   # Unix only: steal the whole tty/process group with a chosen session id
 ./bin/pupptyeer ctl gc --max-idle 1h         # reap sessions idle (no PTY I/O) for >= 1h; --max-idle 0 reaps all
 ./bin/pupptyeer ctl -n myapp new bash        # -n <ns> scopes a subcommand to a namespace (default "default")
 ./bin/pupptyeer ctl list --all-namespaces    # list (or gc) across every namespace

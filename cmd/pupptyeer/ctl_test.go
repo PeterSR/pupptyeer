@@ -87,3 +87,60 @@ func TestExtractNSFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestParseStealArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		want    stealOptions
+		wantErr bool
+	}{
+		{
+			name: "pid only",
+			args: []string{"1234"},
+			want: stealOptions{pid: 1234},
+		},
+		{
+			name: "tty steal with custom id",
+			args: []string{"-T", "--id", "lifted", "5678"},
+			want: stealOptions{pid: 5678, tty: true, id: "lifted"},
+		},
+		{
+			name:    "missing pid",
+			args:    []string{"-T"},
+			wantErr: true,
+		},
+		{
+			name:    "bad pid",
+			args:    []string{"abc"},
+			wantErr: true,
+		},
+		{
+			name:    "missing id value",
+			args:    []string{"--id"},
+			wantErr: true,
+		},
+		{
+			name:    "extra arg",
+			args:    []string{"1234", "tail"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseStealArgs(tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %#v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}

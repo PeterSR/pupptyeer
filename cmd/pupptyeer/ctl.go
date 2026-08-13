@@ -18,9 +18,15 @@ import (
 	"golang.org/x/term"
 )
 
+type stealOptions struct {
+	pid int
+	tty bool
+	id  string
+}
+
 func runCtl(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pupptyeer ctl [-n <namespace>] <list|new|send|capture|attach|expect|resize|kill|gc> [args...]")
+		return errors.New(ctlUsage())
 	}
 	// Namespace selection: -n/--namespace <ns> scopes the connection (default
 	// "default"); --all-namespaces/-A is the cross-cutting view, valid only for
@@ -34,7 +40,7 @@ func runCtl(args []string) error {
 		return err
 	}
 	if len(rest) == 0 {
-		return errors.New("usage: pupptyeer ctl [-n <namespace>] <list|new|send|capture|attach|expect|resize|kill|gc> [args...]")
+		return errors.New(ctlUsage())
 	}
 	cmd := rest[0]
 	sub := rest[1:]
@@ -88,24 +94,26 @@ func runCtl(args []string) error {
 		//   --id <id>        use <id> as the session id instead of a daemon UUID
 		//   --get-or-create  with --id, continue an alive session that holds it instead of erroring
 		for len(rest) > 0 {
-			switch {
-			case rest[0] == "--raw":
+			if rest[0] == "--raw" {
 				opts = append(opts, client.WithRaw())
 				rest = rest[1:]
-			case rest[0] == "--get-or-create":
+				continue
+			}
+			if rest[0] == "--get-or-create" {
 				opts = append(opts, client.WithGetOrCreate())
 				rest = rest[1:]
-			case rest[0] == "--id":
+				continue
+			}
+			if rest[0] == "--id" {
 				if len(rest) < 2 {
 					return errors.New("usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] <command> [args...]")
 				}
 				opts = append(opts, client.WithSessionID(rest[1]))
 				rest = rest[2:]
-			default:
-				goto flagsDone
+				continue
 			}
+			break
 		}
-	flagsDone:
 		if len(rest) < 1 {
 			return errors.New("usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] <command> [args...]")
 		}
@@ -255,6 +263,22 @@ func runCtl(args []string) error {
 		fmt.Printf("reaped %d session(s)\n", len(reaped))
 		return nil
 
+	case "steal":
+		opts, err := parseStealArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		id, err := ctlSteal(c, opts, cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Println(id)
+		return nil
+
 	default:
 		return fmt.Errorf("unknown ctl command %q", args[0])
 	}
@@ -302,6 +326,41 @@ func parseDim(s, name string) (int, error) {
 		return 0, fmt.Errorf("%s must be an integer between 1 and 65535, got %q", name, s)
 	}
 	return n, nil
+}
+
+func ctlUsage() string {
+	return fmt.Sprintf("usage: pupptyeer ctl [-n <namespace>] <%s> [args...]", ctlCommandList())
+}
+
+func parseStealArgs(args []string) (stealOptions, error) {
+	const usage = "usage: pupptyeer ctl steal [-T] [--id <id>] <pid>"
+	var opts stealOptions
+	rest := args
+	for len(rest) > 0 {
+		if rest[0] == "-T" || rest[0] == "--tty-steal" {
+			opts.tty = true
+			rest = rest[1:]
+			continue
+		}
+		if rest[0] == "--id" {
+			if len(rest) < 2 {
+				return stealOptions{}, errors.New(usage)
+			}
+			opts.id = rest[1]
+			rest = rest[2:]
+			continue
+		}
+		break
+	}
+	if len(rest) != 1 {
+		return stealOptions{}, errors.New(usage)
+	}
+	pid, err := strconv.Atoi(rest[0])
+	if err != nil || pid < 1 {
+		return stealOptions{}, fmt.Errorf("pid must be a positive integer, got %q", rest[0])
+	}
+	opts.pid = pid
+	return opts, nil
 }
 
 // detachMatcher scans forwarded stdin for the detach sequence. A single

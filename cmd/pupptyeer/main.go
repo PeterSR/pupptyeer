@@ -38,14 +38,15 @@ func (e *exitError) Error() string {
 	return fmt.Sprintf("exit code %d", e.code)
 }
 
-const usage = `pupptyeer: local PTY session manager
+func usageText() string {
+	return fmt.Sprintf(`pupptyeer: local PTY session manager
 
 Usage:
   pupptyeer daemon                 run the daemon in the foreground
   pupptyeer daemon install         install + start as a per-user service (auto-start at login)
   pupptyeer daemon uninstall       stop + remove the service
   pupptyeer daemon start|stop|restart|status   manage the installed service
-  pupptyeer ctl [-n <ns>] <cmd> [args...]   drive the daemon (list|new|send|capture|attach|expect|resize|kill)
+  pupptyeer ctl [-n <ns>] <cmd> [args...]   drive the daemon (%s)
   pupptyeer version
 
 The MCP server is a separate binary: pupptyeer-mcp (stdio or http).
@@ -58,12 +59,13 @@ else $TMPDIR/pupptyeer-<uid>/daemon.sock
 
 Config (optional): $PUPPTYEER_CONFIG, else <user-config-dir>/pupptyeer/config.toml.
 Customizes the detach key (detach_key) and new-session defaults; ignored if absent.
-`
+`, ctlCommandList())
+}
 
 func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprint(os.Stderr, usageText())
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -87,9 +89,9 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
-		fmt.Print(usage)
+		fmt.Print(usageText())
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", args[0], usage)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", args[0], usageText())
 		os.Exit(2)
 	}
 }
