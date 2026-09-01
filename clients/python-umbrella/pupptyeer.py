@@ -20,7 +20,7 @@ from pupptyeer_client import (
 )
 
 # Kept in step with the pupptyeer project release (see PROTOCOL.md / git tags).
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 
 __all__ = [
     "PupptyeerClient",
