@@ -19,7 +19,7 @@ import (
 
 // Version is the released version of this client, kept in step with the
 // pupptyeer project release (see PROTOCOL.md / git tags).
-const Version = "0.10.1"
+const Version = "0.10.2"
 
 // DefaultNamespace is the namespace a connection uses when none is given.
 // Session identity is (namespace, id): ids are unique within a namespace but
