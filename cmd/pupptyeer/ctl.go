@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -81,47 +82,37 @@ func runCtl(args []string) error {
 			return nil
 		}
 		for _, s := range sessions {
-			fmt.Printf("%s  %s  %dx%d  attached=%d  alive=%v  %s\n",
-				s.Namespace, s.ID, s.Cols, s.Rows, s.Attached, s.Alive, s.Command)
+			// cwd is printed as a keyed field, and only when the session has one,
+			// so the leading positional fields stay where scripts expect them.
+			cwd := ""
+			if s.Cwd != "" {
+				cwd = "  cwd=" + s.Cwd
+			}
+			fmt.Printf("%s  %s  %dx%d  attached=%d  alive=%v%s  %s\n",
+				s.Namespace, s.ID, s.Cols, s.Rows, s.Attached, s.Alive, cwd, s.Command)
 		}
 		return nil
 
 	case "new":
-		rest := args[1:]
-		var opts []client.SessionOption
-		// Optional flags before the command:
-		//   --raw            no terminal emulator (lower CPU/latency; rendered capture unavailable)
-		//   --id <id>        use <id> as the session id instead of a daemon UUID
-		//   --get-or-create  with --id, continue an alive session that holds it instead of erroring
-		for len(rest) > 0 {
-			if rest[0] == "--raw" {
-				opts = append(opts, client.WithRaw())
-				rest = rest[1:]
-				continue
-			}
-			if rest[0] == "--get-or-create" {
-				opts = append(opts, client.WithGetOrCreate())
-				rest = rest[1:]
-				continue
-			}
-			if rest[0] == "--id" {
-				if len(rest) < 2 {
-					return errors.New("usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] <command> [args...]")
-				}
-				opts = append(opts, client.WithSessionID(rest[1]))
-				rest = rest[2:]
-				continue
-			}
-			break
+		o, err := parseNewArgs(args[1:], os.Environ)
+		if err != nil {
+			return err
 		}
-		if len(rest) < 1 {
-			return errors.New("usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] <command> [args...]")
+		var opts []client.SessionOption
+		if o.raw {
+			opts = append(opts, client.WithRaw())
+		}
+		if o.requestedID != "" {
+			opts = append(opts, client.WithSessionID(o.requestedID))
+		}
+		if o.getOrCreate {
+			opts = append(opts, client.WithGetOrCreate())
 		}
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
-		id, err := c.NewSession(rest[0], rest[1:], "", nil, cfg.defaultCols, cfg.defaultRows, opts...)
+		id, err := c.NewSession(o.command, o.args, o.cwd, o.env, cfg.defaultCols, cfg.defaultRows, opts...)
 		if err != nil {
 			return err
 		}
@@ -330,6 +321,148 @@ func parseDim(s, name string) (int, error) {
 
 func ctlUsage() string {
 	return fmt.Sprintf("usage: pupptyeer ctl [-n <namespace>] <%s> [args...]", ctlCommandList())
+}
+
+// newOptions is the parsed form of `ctl new`'s leading flags. env stays nil
+// unless one of the environment flags is given, and nil is what the daemon
+// reads as "inherit my environment" - the historical behaviour of this command.
+type newOptions struct {
+	raw         bool
+	requestedID string
+	getOrCreate bool
+	cwd         string
+	env         map[string]string
+	command     string
+	args        []string
+}
+
+// newUsage is a consumer-visible contract, not just help text: a launcher that
+// has to work against both an older installed pupptyeer and this one feature-
+// detects the environment flags by running `ctl new` with no command and looking
+// for "--copy-env" in the usage it prints (on stderr, with a non-zero exit). Keep
+// the flags spelled out here rather than collapsing them into "[options]".
+const newUsage = "usage: pupptyeer ctl new [--raw] [--id <id> [--get-or-create]] [--cwd <dir>] " +
+	"[--copy-env|--clean-env] [--env NAME=VALUE]... [--env-file <file>]... <command> [args...]"
+
+// parseNewArgs consumes the flags that precede the command to spawn. Parsing
+// stops at the first word that isn't one of ours, so the child's own flags are
+// never touched (`ctl new --cwd /tmp grep -i foo` passes -i to grep).
+//
+// The environment flags build one explicit environment, applied in the order
+// they appear: --copy-env merges in this process's environment, --clean-env
+// resets to empty, --env and --env-file set individual variables. The wire
+// carries either a complete environment or none, so "the daemon's environment
+// plus FOO" is not expressible; --env therefore insists on an explicit base
+// rather than quietly handing the child a one-variable environment.
+//
+// environ is injected (os.Environ in production) so the tests don't depend on
+// the environment they happen to run in.
+func parseNewArgs(args []string, environ func() []string) (newOptions, error) {
+	var o newOptions
+	env := map[string]string{}
+	envTouched := false // any environment flag seen
+	baseChosen := false // --copy-env or --clean-env seen
+
+	rest := args
+loop:
+	for len(rest) > 0 {
+		name := rest[0]
+		switch name {
+		case "--id", "--cwd", "--env", "--env-file":
+			if len(rest) < 2 {
+				return newOptions{}, errors.New(newUsage)
+			}
+		}
+		switch name {
+		case "--raw":
+			o.raw = true
+			rest = rest[1:]
+		case "--get-or-create":
+			o.getOrCreate = true
+			rest = rest[1:]
+		case "--id":
+			o.requestedID = rest[1]
+			rest = rest[2:]
+		case "--cwd":
+			// Resolved here, against the caller's cwd, because the daemon runs
+			// from somewhere else entirely: a relative path sent over the wire
+			// would land in the wrong directory.
+			abs, err := filepath.Abs(rest[1])
+			if err != nil {
+				return newOptions{}, fmt.Errorf("--cwd %q: %w", rest[1], err)
+			}
+			o.cwd = abs
+			rest = rest[2:]
+		case "--copy-env":
+			for _, kv := range environ() {
+				if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+					env[k] = v
+				}
+			}
+			envTouched, baseChosen = true, true
+			rest = rest[1:]
+		case "--clean-env", "-i":
+			env = map[string]string{}
+			envTouched, baseChosen = true, true
+			rest = rest[1:]
+		case "--env":
+			k, v, ok := strings.Cut(rest[1], "=")
+			if !ok || k == "" {
+				return newOptions{}, fmt.Errorf("--env expects NAME=VALUE, got %q", rest[1])
+			}
+			env[k] = v
+			envTouched = true
+			rest = rest[2:]
+		case "--env-file":
+			if err := readEnvFile(rest[1], env); err != nil {
+				return newOptions{}, err
+			}
+			envTouched = true
+			rest = rest[2:]
+		default:
+			break loop
+		}
+	}
+	if len(rest) < 1 {
+		return newOptions{}, errors.New(newUsage)
+	}
+	if envTouched && !baseChosen {
+		return newOptions{}, errors.New("--env/--env-file replace the child's whole environment instead of adding to the daemon's, " +
+			"so they need an explicit starting point: --copy-env to start from this shell's environment, or --clean-env to start from nothing")
+	}
+	if envTouched && len(env) == 0 {
+		return newOptions{}, errors.New("--clean-env with no --env/--env-file would give the child an empty environment, " +
+			"which the wire protocol cannot express (no env means inherit); set at least one variable or drop --clean-env")
+	}
+	if envTouched {
+		o.env = env
+	}
+	o.command, o.args = rest[0], rest[1:]
+	return o, nil
+}
+
+// readEnvFile merges NAME=VALUE lines from path into env. Blank lines and lines
+// whose first non-blank character is # are skipped, the name is trimmed, and the
+// value is taken verbatim to the end of the line: no quote stripping, no variable
+// expansion, so a value may contain spaces, quotes and '=' without ceremony.
+func readEnvFile(path string, env map[string]string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("--env-file: %w", err)
+	}
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if t := strings.TrimSpace(line); t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
+			return fmt.Errorf("%s:%d: expected NAME=VALUE, got %q", path, i+1, strings.TrimSpace(line))
+		}
+		env[k] = v
+	}
+	return nil
 }
 
 func parseStealArgs(args []string) (stealOptions, error) {

@@ -56,6 +56,8 @@ pupptyeer daemon uninstall                   # stop + remove
 # drive it
 ./bin/pupptyeer ctl new bash                 # -> <session-id>
 ./bin/pupptyeer ctl new --raw bash           # raw/fast session: no terminal emulator (no rendered capture; lower CPU/latency)
+./bin/pupptyeer ctl new --cwd ~/src/app bash # start the child in a directory of your choosing (relative paths resolve against your shell)
+./bin/pupptyeer ctl new --copy-env --env TERM=xterm-256color bash   # hand the child this shell's environment, with overrides
 ./bin/pupptyeer ctl list
 ./bin/pupptyeer ctl send <id> $'echo hi\n'
 ./bin/pupptyeer ctl capture <id>             # raw scrollback bytes (ANSI included)
@@ -101,6 +103,36 @@ resolve the same socket; change either and re-run `install`. Linux is verified (
 install also wires the unit to `default.target` so it starts at login, and adds a restart-backoff
 drop-in capped at five minutes); macOS (LaunchAgent) and Windows (service) ride the same command but
 are experimental, like the rest of the cross-platform surface.
+
+### What a session inherits
+
+A new session's child process inherits the **daemon's** environment and working directory, not your
+shell's. Under `daemon install` that daemon is a per-user service, so its environment is a service
+environment: `TERM=dumb`, and a `PATH` without the things a login shell adds (`~/go/bin`,
+`~/.local/bin`, a version-manager's node). A TUI started that way renders as best it can, and
+anything the child shells out to - a git hook, `gh`, `node` - can fail with `command not found` deep
+inside the child, far from the cause.
+
+`ctl new` can set both explicitly, over the socket:
+
+| flag | effect |
+| --- | --- |
+| `--cwd <dir>` | working directory for the child; relative paths resolve against your shell, not the daemon |
+| `--copy-env` | start from this shell's environment |
+| `--clean-env` (`-i`) | start from an empty environment |
+| `--env NAME=VALUE` | set one variable (repeatable) |
+| `--env-file <file>` | set variables from a file of `NAME=VALUE` lines (`#` comments and blank lines ignored; values verbatim, no quote stripping or expansion) |
+
+They apply in the order given, so `--copy-env --env TERM=xterm-256color` means "this shell's
+environment, but with that `TERM`". The wire carries either a complete environment or none, so there
+is no way to add to the daemon's: `--env` and `--env-file` therefore require `--copy-env` or
+`--clean-env` to say what to start from, rather than silently handing the child a one-variable
+environment. With no environment flags at all, the child inherits the daemon's, as it always has.
+
+Passing the environment over the socket also keeps it out of the child's argv, where the
+`env -i NAME=VALUE... command` workaround would leave it for any local user to read in `ps`.
+
+A session that has a `cwd` shows it in `ctl list`.
 
 ## Configuration (optional)
 
