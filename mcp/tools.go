@@ -54,6 +54,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			mcp.WithString("command", mcp.Description("program to run"), mcp.Required()),
 			mcp.WithArray("args", mcp.Description("command arguments")),
 			mcp.WithString("cwd", mcp.Description("working directory")),
+			mcp.WithObject("env", mcp.Description("environment for the child process, as a NAME->VALUE object. Omit to inherit the daemon's environment (which under a managed service is a service environment: TERM=dumb and a thin PATH). When given it REPLACES the environment wholesale, so include everything the program needs, PATH and TERM among them.")),
 			mcp.WithInteger("cols", mcp.Description("initial columns (default 80)")),
 			mcp.WithInteger("rows", mcp.Description("initial rows (default 24)")),
 			mcp.WithBoolean("raw", mcp.Description("don't run a terminal emulator for this session (lower CPU/latency); read_screen rendered grid is then unavailable, raw scrollback still works. Default false.")),
@@ -66,15 +67,16 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 				return mcp.NewToolResultErrorf("daemon not reachable: %v", err), nil
 			}
 			var a struct {
-				Command     string   `json:"command"`
-				Args        []string `json:"args"`
-				Cwd         string   `json:"cwd"`
-				Cols        int      `json:"cols"`
-				Rows        int      `json:"rows"`
-				Raw         bool     `json:"raw"`
-				RequestedID string   `json:"requested_id"`
-				GetOrCreate bool     `json:"get_or_create"`
-				Namespace   string   `json:"namespace"`
+				Command     string            `json:"command"`
+				Args        []string          `json:"args"`
+				Cwd         string            `json:"cwd"`
+				Env         map[string]string `json:"env"`
+				Cols        int               `json:"cols"`
+				Rows        int               `json:"rows"`
+				Raw         bool              `json:"raw"`
+				RequestedID string            `json:"requested_id"`
+				GetOrCreate bool              `json:"get_or_create"`
+				Namespace   string            `json:"namespace"`
 			}
 			if err := r.BindArguments(&a); err != nil {
 				return mcp.NewToolResultErrorf("bad arguments: %v", err), nil
@@ -98,7 +100,7 @@ func buildServer(version string, d *daemonDialer) *server.MCPServer {
 			if a.Namespace != "" {
 				opts = append(opts, client.InNamespace(a.Namespace))
 			}
-			id, err := c.NewSession(a.Command, a.Args, a.Cwd, nil, a.Cols, a.Rows, opts...)
+			id, err := c.NewSession(a.Command, a.Args, a.Cwd, a.Env, a.Cols, a.Rows, opts...)
 			if err != nil {
 				return mcp.NewToolResultErrorf("%v", err), nil
 			}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -142,5 +144,136 @@ func TestParseStealArgs(t *testing.T) {
 				t.Fatalf("got %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseNewArgs pins `ctl new`'s flag parsing: that flags stop at the
+// command so the child's own argv is untouched, that cwd is made absolute
+// against the caller (not the daemon), and the environment rules.
+func TestParseNewArgs(t *testing.T) {
+	fakeEnv := func() []string { return []string{"PATH=/bin", "TERM=xterm", "EMPTY=", "=bogus", "NOEQUALS"} }
+	abs := func(p string) string {
+		a, err := filepath.Abs(p)
+		if err != nil {
+			t.Fatalf("abs %q: %v", p, err)
+		}
+		return a
+	}
+	cases := []struct {
+		name    string
+		args    []string
+		want    newOptions
+		wantErr bool
+	}{
+		{
+			name: "bare command inherits daemon env",
+			args: []string{"bash"},
+			want: newOptions{command: "bash", args: []string{}},
+		},
+		{
+			name: "child flags are not consumed",
+			args: []string{"--raw", "grep", "-i", "--cwd", "foo"},
+			want: newOptions{raw: true, command: "grep", args: []string{"-i", "--cwd", "foo"}},
+		},
+		{
+			name: "existing flags still parse",
+			args: []string{"--raw", "--id", "x", "--get-or-create", "bash"},
+			want: newOptions{raw: true, requestedID: "x", getOrCreate: true, command: "bash", args: []string{}},
+		},
+		{
+			name: "cwd is absolute",
+			args: []string{"--cwd", "/tmp", "bash"},
+			want: newOptions{cwd: "/tmp", command: "bash", args: []string{}},
+		},
+		{
+			name: "relative cwd resolves against the caller",
+			args: []string{"--cwd", "sub/dir", "bash"},
+			want: newOptions{cwd: abs("sub/dir"), command: "bash", args: []string{}},
+		},
+		{
+			name: "copy-env then override",
+			args: []string{"--copy-env", "--env", "TERM=xterm-256color", "bash"},
+			want: newOptions{
+				env:     map[string]string{"PATH": "/bin", "TERM": "xterm-256color", "EMPTY": ""},
+				command: "bash", args: []string{},
+			},
+		},
+		{
+			name: "clean-env starts from nothing",
+			args: []string{"--clean-env", "--env", "PATH=/usr/bin", "bash"},
+			want: newOptions{env: map[string]string{"PATH": "/usr/bin"}, command: "bash", args: []string{}},
+		},
+		{
+			name: "-i is clean-env, and resets an earlier copy",
+			args: []string{"--copy-env", "-i", "--env", "A=1", "bash"},
+			want: newOptions{env: map[string]string{"A": "1"}, command: "bash", args: []string{}},
+		},
+		{
+			name: "value keeps later '=' signs",
+			args: []string{"--clean-env", "--env", "K=a=b=c", "bash"},
+			want: newOptions{env: map[string]string{"K": "a=b=c"}, command: "bash", args: []string{}},
+		},
+		{name: "no command", args: []string{"--raw"}, wantErr: true},
+		{name: "no command after env flags", args: []string{"--copy-env"}, wantErr: true},
+		{name: "dangling --cwd", args: []string{"--cwd"}, wantErr: true},
+		{name: "dangling --env", args: []string{"--env"}, wantErr: true},
+		{name: "env without a base", args: []string{"--env", "A=1", "bash"}, wantErr: true},
+		{name: "env-file without a base", args: []string{"--env-file", "f", "bash"}, wantErr: true},
+		{name: "clean-env with no variables", args: []string{"--clean-env", "bash"}, wantErr: true},
+		{name: "env without '='", args: []string{"--copy-env", "--env", "A", "bash"}, wantErr: true},
+		{name: "env with empty name", args: []string{"--copy-env", "--env", "=1", "bash"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseNewArgs(tc.args, fakeEnv)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %#v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseNewArgsEnvFile covers --env-file: comments, blanks, verbatim values,
+// and that a later --env wins over the file.
+func TestParseNewArgsEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "env")
+	body := "# a comment\n\n  # indented comment\nPATH=/usr/bin\nQUOTED=\"keep quotes\"\nSPACED = has  spaces \nEMPTY=\nCRLF=ok\r\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseNewArgs([]string{"--clean-env", "--env-file", path, "--env", "PATH=/override", "bash"}, os.Environ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]string{
+		"PATH":   "/override",
+		"QUOTED": "\"keep quotes\"",
+		"SPACED": " has  spaces ",
+		"EMPTY":  "",
+		"CRLF":   "ok",
+	}
+	if !reflect.DeepEqual(got.env, want) {
+		t.Fatalf("got %#v, want %#v", got.env, want)
+	}
+
+	bad := filepath.Join(dir, "bad")
+	if err := os.WriteFile(bad, []byte("PATH=/usr/bin\nnot a pair\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseNewArgs([]string{"--clean-env", "--env-file", bad, "bash"}, os.Environ); err == nil {
+		t.Fatal("expected an error for a line without '='")
+	}
+	if _, err := parseNewArgs([]string{"--clean-env", "--env-file", filepath.Join(dir, "missing"), "bash"}, os.Environ); err == nil {
+		t.Fatal("expected an error for a missing file")
 	}
 }

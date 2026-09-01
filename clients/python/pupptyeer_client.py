@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Released version of this client, kept in step with the pupptyeer project
 # release (see PROTOCOL.md / git tags).
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 import base64
 import json
