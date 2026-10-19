@@ -134,6 +134,48 @@ Passing the environment over the socket also keeps it out of the child's argv, w
 
 A session that has a `cwd` shows it in `ctl list`.
 
+## Docker
+
+`ghcr.io/petersr/pupptyeer:<version>` (and `latest`, for non-prerelease tags) is a small image
+(debian bookworm slim, linux/amd64 and linux/arm64) built from the same static binaries as the
+release, published from the first release after v0.10.2. It holds, as real files under
+`/opt/pupptyeer/bin`:
+
+| File | What |
+| --- | --- |
+| `pupptyeer` | daemon + CLI |
+| `pupptyeer-mcp` | MCP front-end |
+| `pupptyeer-entrypoint` | POSIX `sh` helper: starts the daemon in the background, waits up to 10s for its socket (`$PUPPTYEER_SOCK`, default `/tmp/pupptyeer/daemon.sock`), fails with a message if the daemon dies, then `exec`s your command (no command: `sh`). A daemon already answering on the socket is reused rather than replaced. The daemon banner goes to stderr. |
+| `tini` | static [tini](https://github.com/krallin/tini), so the daemon and its ptys die with the container |
+
+Run it directly (the default entrypoint is tini plus the helper; the process runs as user
+`pupptyeer`, uid/gid 1000, and `HOME=/home/pupptyeer` is world-writable so `--user <uid>` works too):
+
+```sh
+docker run --rm ghcr.io/petersr/pupptyeer:latest pupptyeer version
+docker run --rm -it ghcr.io/petersr/pupptyeer:latest sh -c 'pupptyeer ctl new bash; pupptyeer ctl list'
+```
+
+To build on it from another image, copy the directory and add what the base lacks:
+
+```dockerfile
+# Any base with a shell, which the ptys need.
+FROM debian:bookworm-slim
+COPY --from=ghcr.io/petersr/pupptyeer:<version> /opt/pupptyeer/bin /opt/pupptyeer/bin
+# The helper also puts its own directory on PATH, for the daemon's sessions.
+ENV PATH=/opt/pupptyeer/bin:$PATH
+ENV PUPPTYEER_SOCK=/tmp/pupptyeer/daemon.sock
+# add your own user (and a writable HOME) if you do not want root
+ENTRYPOINT ["/opt/pupptyeer/bin/tini", "-g", "--", "/opt/pupptyeer/bin/pupptyeer-entrypoint"]
+CMD ["your-command"]
+```
+
+The helper only needs `sh`, `dirname`, `mkdir`, `rm`, `sleep` (with fractional seconds) and `kill`,
+which any base with a shell has. Pin by digest for reproducible builds:
+`ghcr.io/petersr/pupptyeer:<version>@sha256:<digest>` (shown by `docker buildx imagetools inspect
+ghcr.io/petersr/pupptyeer:<version>`). `make docker` builds the same image locally for the host arch
+as `pupptyeer:local`, and only under that name, so it never shadows the published image.
+
 ## Configuration (optional)
 
 The CLI reads an optional [TOML](https://toml.io) config file, resolved in order: `$PUPPTYEER_CONFIG`,

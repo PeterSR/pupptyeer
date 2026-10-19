@@ -54,6 +54,35 @@ archives:
       - PROTOCOL.md
       - LICENSE
 
+# Image ghcr.io/petersr/pupptyeer. goreleaser puts the freshly built linux
+# binaries in the build context at linux/<arch>/<binary> (the release assets
+# are drafts/not yet downloadable while this runs) and keeps extra_files at
+# their repo path. `latest` is only added for non-prerelease tags.
+dockers_v2:
+  - id: pupptyeer
+    ids: [pupptyeer, pupptyeer-mcp]
+    images:
+      - ghcr.io/petersr/pupptyeer
+    tags:
+      - "{{ .Version }}"
+      - '{{ if not .Prerelease }}latest{{ end }}'
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: docker/Dockerfile
+    extra_files:
+      - docker/pupptyeer-entrypoint.sh
+    build_args:
+      PUPPTYEER_VERSION: "{{ .Version }}"
+      REVISION: "{{ .FullCommit }}"
+    # The Dockerfile's labels sit in each platform's image config; ghcr reads a
+    # multi-arch package's description from the index, which goreleaser
+    # annotates (it adds the index: prefix when building several platforms).
+    annotations:
+      org.opencontainers.image.description: "pupptyeer daemon, CLI and MCP server (static binaries)"
+      org.opencontainers.image.source: "https://github.com/PeterSR/pupptyeer"
+      org.opencontainers.image.licenses: "MIT"
+
 checksum:
   name_template: checksums.txt
 
