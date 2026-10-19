@@ -10,6 +10,7 @@ pupptyeer ships these public artifacts, all versioned in lockstep with the proje
 | `pupptyeer-client` | PyPI | `clients/python` | PyPI OIDC trusted publishing |
 | `pupptyeer` (umbrella alias) | PyPI | `clients/python-umbrella` | PyPI OIDC trusted publishing |
 | `@petersr/pupptyeer` (+ 6 platform pkgs) | npm | `npm/` | npm OIDC trusted publishing |
+| `ghcr.io/petersr/pupptyeer:<version>` (+ `latest`) | ghcr.io | `docker/`, goreleaser `dockers_v2` | `GITHUB_TOKEN` (`packages: write`) |
 | `clients/go` (Go module) | GitHub (git tag) | `clients/go/` | `clients/go/vX.Y.Z` tag, pushed automatically by `release.yml` |
 
 The PyPI `pupptyeer` is a thin alias that just depends on and re-exports `pupptyeer-client`; it
@@ -82,6 +83,17 @@ long-lived secret, and `--provenance` works out of the box.)
    equal the tag. The `tag-go-client` job also creates and pushes `clients/go/vX.Y.Z` at the same
    commit so external Go consumers can pin `github.com/PeterSR/pupptyeer/clients/go@vX.Y.Z` (Go
    resolves a subdirectory module from the prefixed tag, not the root `vX.Y.Z`).
+
+## Docker image
+
+Published by the same goreleaser run (the `goreleaser` job: QEMU + buildx + a ghcr login with
+`GITHUB_TOKEN`, `packages: write`), as `ghcr.io/petersr/pupptyeer:<version>` for linux/amd64 and
+arm64, plus `latest` for non-prerelease tags. It is built from the freshly built binaries in the
+goreleaser build context, so it does not depend on the GitHub release being downloadable. After the
+**first** push the package is private: make it public once under the GitHub package settings
+(and link it to the repo) so other images can `COPY --from` it. Validate locally with `make docker`
+and `goreleaser check`; `goreleaser release --snapshot --clean --skip=publish` also builds the image,
+but its arm64 half needs QEMU binfmt on the build host (CI gets it from `docker/setup-qemu-action`).
 
 ## Local validation (no upload)
 
